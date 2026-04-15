@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Synology Opslag Beheer</title>
+<style>
+/* ===================== RESET & BASE ===================== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --sidebar-bg:   #1e293b;
+  --sidebar-text: #94a3b8;
+  --sidebar-act:  #3b82f6;
+  --primary:      #3b82f6;
+  --primary-h:    #2563eb;
+  --success:      #22c55e;
+  --warning:      #f59e0b;
+  --danger:       #ef4444;
+  --bg:           #f1f5f9;
+  --card-bg:      #ffffff;
+  --text:         #1e293b;
+  --muted:        #64748b;
+  --border:       #e2e8f0;
+  --radius:       8px;
+  --shadow:       0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+  --shadow-lg:    0 4px 16px rgba(0,0,0,.12);
+}
+html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; font-size: 14px; color: var(--text); }
+button { cursor: pointer; font-family: inherit; font-size: 13px; border: none; border-radius: var(--radius); padding: 6px 14px; transition: background .15s, opacity .15s; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+input, select { font-family: inherit; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 9px; outline: none; }
+input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59,130,246,.15); }
+a { color: var(--primary); text-decoration: none; }
+
+/* ===================== LAYOUT ===================== */
+#app { display: flex; height: 100vh; overflow: hidden; }
+
+/* ---- SIDEBAR ---- */
+.sidebar {
+  width: 220px; flex-shrink: 0;
+  background: var(--sidebar-bg);
+  display: flex; flex-direction: column;
+  padding: 0;
+  overflow-y: auto;
+}
+.sidebar-brand {
+  padding: 20px 18px 16px;
+  display: flex; align-items: center; gap: 10px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+.sidebar-brand svg { width: 26px; height: 26px; flex-shrink: 0; }
+.sidebar-brand span { color: #f8fafc; font-weight: 600; font-size: 15px; line-height: 1.2; }
+.nav-list { list-style: none; padding: 12px 0; flex: 1; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 18px; color: var(--sidebar-text);
+  cursor: pointer; border-left: 3px solid transparent;
+  transition: background .15s, color .15s;
+  user-select: none;
+}
+.nav-item:hover { background: rgba(255,255,255,.05); color: #f8fafc; }
+.nav-item.active { background: rgba(59,130,246,.15); color: #f8fafc; border-left-color: var(--sidebar-act); }
+.nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+/* ---- MAIN CONTENT ---- */
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+.main-header {
+  padding: 16px 24px; background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+}
+.main-header h1 { font-size: 18px; font-weight: 600; }
+.header-actions { display: flex; gap: 8px; align-items: center; }
+.content-area { flex: 1; overflow-y: auto; padding: 24px; }
+
+/* ===================== TABS ===================== */
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ===================== CARDS ===================== */
+.card { background: var(--card-bg); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 20px; }
+.card-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.card-title { font-weight: 600; font-size: 14px; }
+.card-body { padding: 18px; }
+
+/* ===================== STATS GRID ===================== */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
+.stat-card { background: var(--card-bg); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px; }
+.stat-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+.stat-value { font-size: 24px; font-weight: 700; color: var(--text); }
+.stat-sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+
+/* ===================== TABLES ===================== */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th { text-align: left; padding: 10px 12px; background: #f8fafc; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--muted); white-space: nowrap; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+tbody tr { border-bottom: 1px solid var(--border); }
+tbody tr:last-child { border-bottom: none; }
+tbody tr:hover { background: #f8fafc; }
+tbody td { padding: 9px 12px; vertical-align: middle; }
+.cell-path { color: var(--muted); font-size: 12px; font-family: monospace; }
+.cell-size { font-weight: 600; }
+.cell-mono { font-family: monospace; font-size: 12px; }
+
+/* Progress bar */
+.bar-wrap { width: 120px; }
+.bar-bg { height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; }
+.bar-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width .3s; }
+
+/* ===================== BUTTONS ===================== */
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-h); }
+.btn-secondary { background: #e2e8f0; color: var(--text); }
+.btn-secondary:hover { background: #cbd5e1; }
+.btn-success  { background: var(--success); color: #fff; }
+.btn-success:hover { filter: brightness(.92); }
+.btn-danger   { background: var(--danger); color: #fff; }
+.btn-danger:hover { filter: brightness(.92); }
+.btn-warning  { background: var(--warning); color: #fff; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-icon { background: transparent; color: var(--muted); padding: 4px; border-radius: 4px; }
+.btn-icon:hover { background: var(--border); color: var(--text); }
+
+/* ===================== EXCEL TABLE ===================== */
+.excel-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.dirty-badge { background: var(--warning); color: #fff; font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.excel-meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.excel-table input { border: 1px solid transparent; background: transparent; width: 100%; min-width: 60px; padding: 2px 4px; }
+.excel-table input:focus { border-color: var(--primary); background: #fff; }
+.excel-table .col-calc { background: #f8fafc; color: var(--muted); font-style: italic; text-align: right; white-space: nowrap; }
+.excel-table .col-num { text-align: right; }
+.excel-table .col-nas select { min-width: 130px; font-size: 12px; padding: 2px 4px; }
+.row-delete { color: var(--danger); opacity: .5; }
+.row-delete:hover { opacity: 1; background: #fef2f2; }
+.row-synced td { animation: flash-green .6s ease; }
+@keyframes flash-green { 0%,100%{background:transparent} 50%{background:#dcfce7} }
+
+/* ===================== HISTORY ===================== */
+.history-tabs { display: flex; gap: 0; margin-bottom: 18px; border-bottom: 2px solid var(--border); }
+.htab { padding: 8px 18px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -2px; }
+.htab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+.history-list { display: flex; flex-direction: column; gap: 10px; }
+.history-item {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 12px 16px; background: var(--card-bg);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  gap: 12px;
+}
+.history-item:hover { border-color: var(--primary); }
+.history-info { flex: 1; min-width: 0; }
+.history-title { font-weight: 600; font-size: 13px; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.history-sub { font-size: 12px; color: var(--muted); }
+.history-actions { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
+
+/* ===================== SETTINGS ===================== */
+.settings-section { margin-bottom: 24px; }
+.settings-section h3 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 12px; }
+.form-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.form-row input, .form-row select { flex: 1; }
+.list-item { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.list-item span { flex: 1; font-family: monospace; font-size: 13px; background: #f8fafc; border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 9px; }
+
+/* ===================== MODAL ===================== */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.modal-backdrop.hidden { display: none; }
+.modal-box {
+  background: var(--card-bg); border-radius: var(--radius);
+  box-shadow: var(--shadow-lg); padding: 24px; max-width: 420px; width: 90%;
+}
+.modal-box h3 { margin-bottom: 10px; font-size: 16px; }
+.modal-box p { color: var(--muted); margin-bottom: 20px; line-height: 1.5; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ===================== TOASTS ===================== */
+#toasts { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 2000; }
+.toast {
+  background: var(--text); color: #fff; padding: 10px 18px;
+  border-radius: var(--radius); box-shadow: var(--shadow-lg);
+  font-size: 13px; max-width: 320px; opacity: 1;
+  transition: opacity .3s;
+}
+.toast.success { background: var(--success); }
+.toast.error   { background: var(--danger); }
+.toast.warning { background: var(--warning); }
+.toast.fading  { opacity: 0; }
+
+/* ===================== MISC ===================== */
+.empty-state { text-align: center; padding: 48px 24px; color: var(--muted); }
+.empty-state svg { width: 48px; height: 48px; margin: 0 auto 14px; opacity: .3; display: block; }
+.loading { color: var(--muted); padding: 24px; text-align: center; }
+.tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
+.tag-upload { background: #dbeafe; color: #1d4ed8; }
+.tag-edit   { background: #dcfce7; color: #166534; }
+.tag-restore{ background: #fef9c3; color: #854d0e; }
+.separator { color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2">
+        <rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/>
+        <rect x="2" y="17" width="20" height="5" rx="1"/>
+        <circle cx="18" cy="5.5" r="1" fill="#3b82f6" stroke="none"/>
+        <circle cx="18" cy="12.5" r="1" fill="#3b82f6" stroke="none"/>
+      </svg>
+      <span>Opslag<br>Beheer</span>
+    </div>
+    <ul class="nav-list">
+      <li class="nav-item active" data-tab="dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+          <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+        </svg>
+        Dashboard
+      </li>
+      <li class="nav-item" data-tab="excel">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+        </svg>
+        Excel Data
+      </li>
+      <li class="nav-item" data-tab="history">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="12 8 12 12 14 14"/>
+          <path d="M3.05 11a9 9 0 108.83-7A9 9 0 003 11"/>
+          <polyline points="3 4 3 11 10 11"/>
+        </svg>
+        Geschiedenis
+      </li>
+      <li class="nav-item" data-tab="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+        Instellingen
+      </li>
+    </ul>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="main-header">
+      <h1 id="page-title">Dashboard</h1>
+      <div class="header-actions" id="header-actions"></div>
+    </div>
+
+    <div class="content-area">
+
+      <!-- ========== DASHBOARD ========== -->
+      <div id="tab-dashboard" class="tab-content active">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Totale opslag</div>
+            <div class="stat-value" id="stat-total">—</div>
+            <div class="stat-sub" id="stat-total-sub"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Aantal shares</div>
+            <div class="stat-value" id="stat-count">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Grootste share</div>
+            <div class="stat-value" id="stat-largest">—</div>
+            <div class="stat-sub" id="stat-largest-name"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Klanten in Excel</div>
+            <div class="stat-value" id="stat-excel-rows">—</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">NAS Shares</span>
+            <div style="display:flex;gap:8px;align-items:center">
+              <span id="shares-updated" style="font-size:12px;color:var(--muted)"></span>
+              <button class="btn-secondary btn-sm" onclick="loadShares()">Vernieuwen</button>
+            </div>
+          </div>
+          <div class="card-body" style="padding:0">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Share naam</th>
+                    <th>Pad</th>
+                    <th>Grootte</th>
+                    <th>GB</th>
+                    <th style="width:140px">Gebruik</th>
+                  </tr>
+                </thead>
+                <tbody id="shares-body">
+                  <tr><td colspan="5" class="loading">Shares laden…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== EXCEL ========== -->
+      <div id="tab-excel" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Excel Data</span>
+          </div>
+          <div class="card-body">
+            <div class="excel-toolbar">
+              <label class="btn-primary" style="padding:6px 14px;border-radius:var(--radius);color:#fff;background:var(--primary);cursor:pointer">
+                Excel uploaden
+                <input type="file" id="excel-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleUpload(this)">
+              </label>
+              <button class="btn-success" onclick="exportExcel()">Exporteren (.xlsx)</button>
+              <button class="btn-primary" id="save-btn" onclick="saveExcel()" disabled>Opslaan</button>
+              <button class="btn-secondary" id="sync-btn" onclick="syncFromNAS()" disabled>Sync opslag van NAS</button>
+              <button class="btn-secondary btn-sm" onclick="addRow()">+ Rij toevoegen</button>
+              <span class="dirty-badge" id="dirty-badge" style="display:none">Niet opgeslagen</span>
+            </div>
+            <div class="excel-meta" id="excel-meta"></div>
+            <div class="table-wrap">
+              <table class="excel-table" id="excel-table">
+                <thead id="excel-thead"></thead>
+                <tbody id="excel-tbody">
+                  <tr><td colspan="10" class="loading">Geen data. Upload een Excel bestand.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== HISTORY ========== -->
+      <div id="tab-history" class="tab-content">
+        <div class="card">
+          <div class="card-header"><span class="card-title">Versiegeschiedenis</span></div>
+          <div class="card-body">
+            <div class="history-tabs">
+              <div class="htab active" onclick="showHistoryTab('uploads',this)">Uploads</div>
+              <div class="htab" onclick="showHistoryTab('edits',this)">Bewerkingen</div>
+            </div>
+            <div id="history-uploads" class="history-list"></div>
+            <div id="history-edits"   class="history-list" style="display:none"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== SETTINGS ========== -->
+      <div id="tab-settings" class="tab-content">
+        <div class="card">
+          <div class="card-body">
+
+            <div class="settings-section">
+              <h3>Share paden</h3>
+              <div id="share-paths-list"></div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <input id="new-share-path" placeholder="/volume1" style="flex:1">
+                <button class="btn-secondary" onclick="addSharePath()">Toevoegen</button>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h3>Uitgesloten shares</h3>
+              <div id="exclude-list"></div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <input id="new-exclude" placeholder="@eaDir">
+                <button class="btn-secondary" onclick="addExclude()">Toevoegen</button>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h3>Facturatie formule</h3>
+              <div class="form-row">
+                <label style="width:200px;color:var(--muted)">GB per mailbox (gratis)</label>
+                <input type="number" id="mailbox-gb" min="0" step="0.5" style="width:100px">
+                <span style="color:var(--muted);font-size:12px;margin-left:8px">Te factureren = Gebruikte opslag − (<span id="mailbox-gb-preview">10</span> × Mailboxen)</span>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h3>Retentie</h3>
+              <div class="form-row">
+                <label style="width:200px;color:var(--muted)">Upload retentie (max bewaard)</label>
+                <select id="upload-retention">
+                  <option value="5">5 uploads</option>
+                  <option value="10">10 uploads</option>
+                  <option value="20">20 uploads</option>
+                  <option value="50">50 uploads</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label style="width:200px;color:var(--muted)">Bewerking retentie (max bewaard)</label>
+                <select id="edit-retention">
+                  <option value="5">5 bewerkingen</option>
+                  <option value="10">10 bewerkingen</option>
+                  <option value="20">20 bewerkingen</option>
+                  <option value="50">50 bewerkingen</option>
+                </select>
+              </div>
+            </div>
+
+            <button class="btn-primary" onclick="saveSettings()">Instellingen opslaan</button>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /content-area -->
+  </main>
+</div>
+
+<!-- MODAL -->
+<div class="modal-backdrop hidden" id="modal">
+  <div class="modal-box">
+    <h3 id="modal-title"></h3>
+    <p  id="modal-body"></p>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="closeModal()">Annuleren</button>
+      <button class="btn-primary"   id="modal-confirm">Bevestigen</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOASTS -->
+<div id="toasts"></div>
+
+<script>
+'use strict';
+
+// ===================== STATE =====================
+const S = {
+  shares: [],
+  excel:  { headers: [], rows: [], _meta: {} },
+  editBuffer: [],           // working copy of rows
+  dirty: false,
+  history: { uploads: [], edits: [] },
+  settings: {},
+};
+
+// ===================== UTILS =====================
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function fmtBytes(b) {
+  const u = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (b >= 1024 && i < u.length-1) { b /= 1024; i++; }
+  return `${b.toFixed(i>=3?2:1)} ${u[i]}`;
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('nl-NL');
+}
+function setDirty(v) {
+  S.dirty = v;
+  document.getElementById('dirty-badge').style.display = v ? '' : 'none';
+  document.getElementById('save-btn').disabled = !v;
+}
+
+// ===================== TOAST =====================
+function toast(msg, type='info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => { el.classList.add('fading'); setTimeout(() => el.remove(), 320); }, 3200);
+}
+
+// ===================== MODAL =====================
+function showConfirm(title, msg, onOk) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').textContent  = msg;
+  document.getElementById('modal').classList.remove('hidden');
+  const btn = document.getElementById('modal-confirm');
+  btn.onclick = () => { closeModal(); onOk(); };
+}
+function closeModal() { document.getElementById('modal').classList.add('hidden'); }
+
+// ===================== API =====================
+async function GET(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function POST(url, data) {
+  const r = await fetch(url, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(data),
+  });
+  if (!r.ok) { const e = await r.json().catch(()=>({error:'Onbekende fout'})); throw new Error(e.error||`HTTP ${r.status}`); }
+  return r.json();
+}
+async function UPLOAD(url, fd) {
+  const r = await fetch(url, { method:'POST', body:fd });
+  if (!r.ok) { const e = await r.json().catch(()=>({error:'Onbekende fout'})); throw new Error(e.error||`HTTP ${r.status}`); }
+  return r.json();
+}
+
+// ===================== TABS =====================
+function showTab(tab) {
+  document.querySelectorAll('.nav-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.tab === tab));
+  document.querySelectorAll('.tab-content').forEach(el =>
+    el.classList.toggle('active', el.id === `tab-${tab}`));
+  const titles = { dashboard:'Dashboard', excel:'Excel Data', history:'Geschiedenis', settings:'Instellingen' };
+  document.getElementById('page-title').textContent = titles[tab] ?? tab;
+  document.getElementById('header-actions').innerHTML = '';
+  if (tab === 'dashboard') loadShares();
+  if (tab === 'excel')     loadExcel();
+  if (tab === 'history')   loadHistory();
+  if (tab === 'settings')  loadSettings();
+}
+
+// ===================== DASHBOARD =====================
+async function loadShares() {
+  document.getElementById('shares-body').innerHTML =
+    '<tr><td colspan="5" class="loading">Shares laden…</td></tr>';
+  try {
+    const d = await GET('/api/shares');
+    S.shares = d.shares;
+    renderShares();
+    document.getElementById('shares-updated').textContent =
+      'Bijgewerkt: ' + new Date().toLocaleTimeString('nl-NL');
+    // update excel sync button
+    document.getElementById('sync-btn').disabled = !S.shares.length || !S.editBuffer.length;
+  } catch(e) {
+    document.getElementById('shares-body').innerHTML =
+      `<tr><td colspan="5" style="color:var(--danger);padding:16px">Fout: ${esc(e.message)}</td></tr>`;
+  }
+}
+function renderShares() {
+  const shares = S.shares;
+  const maxB = shares.reduce((m,s) => Math.max(m,s.size_bytes), 1);
+  const totalB = shares.reduce((t,s) => t+s.size_bytes, 0);
+
+  document.getElementById('stat-total').textContent   = fmtBytes(totalB);
+  document.getElementById('stat-count').textContent   = shares.length;
+  if (shares.length) {
+    document.getElementById('stat-largest').textContent     = shares[0].size_human;
+    document.getElementById('stat-largest-name').textContent = shares[0].name;
+  }
+  // excel rows count
+  document.getElementById('stat-excel-rows').textContent =
+    S.editBuffer.length || (S.excel.rows ? S.excel.rows.length : '—');
+
+  if (!shares.length) {
+    document.getElementById('shares-body').innerHTML =
+      `<tr><td colspan="5"><div class="empty-state">Geen shares gevonden.<br>Controleer de share paden in Instellingen.</div></td></tr>`;
+    return;
+  }
+
+  document.getElementById('shares-body').innerHTML = shares.map(s => {
+    const pct = (s.size_bytes / maxB * 100).toFixed(1);
+    const color = pct > 80 ? 'var(--danger)' : pct > 60 ? 'var(--warning)' : 'var(--primary)';
+    return `<tr>
+      <td><strong>${esc(s.name)}</strong></td>
+      <td class="cell-path">${esc(s.path)}</td>
+      <td class="cell-size">${esc(s.size_human)}</td>
+      <td class="cell-mono">${s.size_gb} GB</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar-bg"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ===================== EXCEL =====================
+
+// Find column header by keyword (case-insensitive partial match)
+function findCol(headers, ...kws) {
+  return headers.find(h => kws.some(k => h.toLowerCase().includes(k.toLowerCase()))) ?? null;
+}
+
+function calcBilling(row, headers) {
+  const mCol = findCol(headers, 'mailbox');
+  const gCol = findCol(headers, 'gebruik', 'used');
+  if (!mCol || !gCol) return null;
+  const m  = parseFloat(row[mCol]) || 0;
+  const g  = parseFloat(row[gCol]) || 0;
+  const gb = parseFloat(S.settings.mailbox_gb ?? 10);
+  return Math.round(g - (gb * m));
+}
+
+async function loadExcel() {
+  try {
+    const d = await GET('/api/excel/current');
+    S.excel      = d;
+    S.editBuffer = d.rows ? d.rows.map(r => ({ ...r })) : [];
+    renderExcel();
+    setDirty(false);
+    document.getElementById('sync-btn').disabled = !S.shares.length || !S.editBuffer.length;
+  } catch(e) {
+    toast('Fout bij laden Excel: ' + e.message, 'error');
+  }
+}
+
+function renderExcel() {
+  const headers = S.excel.headers || [];
+  const rows    = S.editBuffer;
+  const meta    = S.excel._meta || {};
+
+  // Meta info
+  const metaEl = document.getElementById('excel-meta');
+  if (meta.original_filename || meta.source) {
+    metaEl.textContent = [
+      meta.original_filename ? `Bestand: ${meta.original_filename}` : '',
+      meta.uploaded_at ? `Geüpload: ${fmtDate(meta.uploaded_at)}` : '',
+      meta.saved_at    ? `Opgeslagen: ${fmtDate(meta.saved_at)}` : '',
+      `${rows.length} rijen`,
+    ].filter(Boolean).join('  •  ');
+  } else {
+    metaEl.textContent = rows.length ? `${rows.length} rijen` : 'Geen data geladen.';
+  }
+
+  if (!headers.length) {
+    document.getElementById('excel-thead').innerHTML = '';
+    document.getElementById('excel-tbody').innerHTML =
+      '<tr><td colspan="10" class="loading">Upload een Excel bestand om te beginnen.</td></tr>';
+    return;
+  }
+
+  // Identify special columns
+  const mailboxCol  = findCol(headers, 'mailbox');
+  const gebruiktCol = findCol(headers, 'gebruik', 'used');
+  const facturenCol = findCol(headers, 'factur', 'invoice');
+
+  // THEAD (add NAS Share column at end)
+  document.getElementById('excel-thead').innerHTML = '<tr>' +
+    headers.map(h => `<th>${esc(h)}</th>`).join('') +
+    '<th>NAS Koppeling</th>' +
+    '<th></th>' +
+  '</tr>';
+
+  // TBODY
+  document.getElementById('excel-tbody').innerHTML = rows.map((row, ri) => {
+    const billing = facturenCol ? calcBilling(row, headers) : null;
+
+    const cells = headers.map(h => {
+      const v = row[h] ?? '';
+      if (h === facturenCol) {
+        // calculated, read-only
+        return `<td class="col-calc col-num">${billing !== null ? billing : esc(v)}</td>`;
+      }
+      const isNum = h === mailboxCol || h === gebruiktCol
+        || h === findCol(headers, 'licent', 'licentie')
+        || h === findCol(headers, 'volgnummer', 'nummer');
+      return `<td>
+        <input type="${isNum ? 'number' : 'text'}" value="${esc(v)}"
+          data-row="${ri}" data-col="${esc(h)}"
+          onchange="cellChanged(${ri},'${esc(h)}',this.value)"
+          oninput="cellChanged(${ri},'${esc(h)}',this.value)">
+      </td>`;
+    }).join('');
+
+    // NAS dropdown
+    const shareSel = S.shares.length
+      ? `<select data-row="${ri}" onchange="shareLinked(${ri},this.value)">
+          <option value="">— koppel share —</option>
+          ${S.shares.map(s => `<option value="${esc(s.name)}" ${row._share===s.name?'selected':''}>${esc(s.name)} (${esc(s.size_human)})</option>`).join('')}
+        </select>`
+      : `<span style="color:var(--muted);font-size:12px">Laad dashboard eerst</span>`;
+
+    return `<tr id="erow-${ri}">
+      ${cells}
+      <td class="col-nas">${shareSel}</td>
+      <td><button class="btn-icon row-delete btn-sm" onclick="deleteRow(${ri})" title="Verwijder rij">✕</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function cellChanged(ri, col, val) {
+  S.editBuffer[ri][col] = val === '' ? null : (isNaN(val) || val === '' ? val : Number(val));
+  // Recalculate billing cell for this row
+  const headers = S.excel.headers || [];
+  const facturenCol = findCol(headers, 'factur', 'invoice');
+  if (facturenCol) {
+    const billing = calcBilling(S.editBuffer[ri], headers);
+    const row = document.getElementById(`erow-${ri}`);
+    if (row) {
+      const calcCells = row.querySelectorAll('.col-calc');
+      if (calcCells.length) calcCells[0].textContent = billing !== null ? billing : '';
+    }
+  }
+  setDirty(true);
+}
+
+function shareLinked(ri, shareName) {
+  S.editBuffer[ri]._share = shareName || null;
+  setDirty(true);
+}
+
+function addRow() {
+  const headers = S.excel.headers || [];
+  if (!headers.length) { toast('Upload eerst een Excel bestand.', 'warning'); return; }
+  const emptyRow = {};
+  headers.forEach(h => { emptyRow[h] = null; });
+  emptyRow._share = null;
+  const maxSeq = S.editBuffer.reduce((m, r) => {
+    const seq = parseInt(r[headers[0]]);
+    return isNaN(seq) ? m : Math.max(m, seq);
+  }, 0);
+  emptyRow[headers[0]] = maxSeq + 1;
+  S.editBuffer.push(emptyRow);
+  renderExcel();
+  setDirty(true);
+}
+
+function deleteRow(ri) {
+  showConfirm('Rij verwijderen', 'Weet je zeker dat je deze rij wilt verwijderen?', () => {
+    S.editBuffer.splice(ri, 1);
+    renderExcel();
+    setDirty(true);
+  });
+}
+
+async function handleUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  input.value = '';
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    toast('Excel bestand uploaden…');
+    const res = await UPLOAD('/api/excel/upload', fd);
+    S.excel      = res.data;
+    S.editBuffer = res.data.rows.map(r => ({ ...r }));
+    renderExcel();
+    setDirty(false);
+    document.getElementById('sync-btn').disabled = !S.shares.length;
+    toast('Excel succesvol geüpload!', 'success');
+  } catch(e) {
+    toast('Upload mislukt: ' + e.message, 'error');
+  }
+}
+
+async function saveExcel() {
+  try {
+    const payload = { ...S.excel, rows: S.editBuffer };
+    await POST('/api/excel/save', payload);
+    S.excel.rows = S.editBuffer.map(r => ({ ...r }));
+    setDirty(false);
+    toast('Opgeslagen!', 'success');
+  } catch(e) {
+    toast('Opslaan mislukt: ' + e.message, 'error');
+  }
+}
+
+async function exportExcel() {
+  try {
+    // Save first if dirty
+    if (S.dirty) await saveExcel();
+    window.location.href = '/api/excel/export';
+  } catch(e) {
+    toast('Export mislukt: ' + e.message, 'error');
+  }
+}
+
+async function syncFromNAS() {
+  if (!S.shares.length) { await loadShares(); }
+  const headers     = S.excel.headers || [];
+  const gebruiktCol = findCol(headers, 'gebruik', 'used');
+  if (!gebruiktCol) {
+    toast('Geen "Gebruikte opslag" kolom gevonden in Excel.', 'warning');
+    return;
+  }
+
+  let updated = 0;
+  const shareMap = {};
+  S.shares.forEach(s => { shareMap[s.name] = s; });
+
+  S.editBuffer.forEach((row, ri) => {
+    if (!row._share || !shareMap[row._share]) return;
+    const share = shareMap[row._share];
+    row[gebruiktCol] = share.size_gb;
+    updated++;
+    // Flash row
+    const tr = document.getElementById(`erow-${ri}`);
+    if (tr) {
+      tr.classList.remove('row-synced');
+      void tr.offsetWidth;
+      tr.classList.add('row-synced');
+    }
+  });
+
+  if (updated === 0) {
+    toast('Geen NAS koppelingen ingesteld. Koppel shares via de NAS Koppeling kolom.', 'warning');
+    return;
+  }
+
+  renderExcel();
+  setDirty(true);
+  toast(`${updated} rij(en) bijgewerkt vanuit NAS.`, 'success');
+}
+
+// ===================== HISTORY =====================
+function showHistoryTab(tab, el) {
+  document.querySelectorAll('.htab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('history-uploads').style.display = tab === 'uploads' ? '' : 'none';
+  document.getElementById('history-edits').style.display   = tab === 'edits'   ? '' : 'none';
+}
+
+async function loadHistory() {
+  try {
+    const d = await GET('/api/history');
+    S.history = d;
+    renderHistory();
+  } catch(e) {
+    toast('Fout bij laden geschiedenis: ' + e.message, 'error');
+  }
+}
+
+function renderHistory() {
+  renderHistoryList('history-uploads', S.history.uploads, 'upload');
+  renderHistoryList('history-edits',   S.history.edits,   'edit');
+}
+
+function renderHistoryList(containerId, items, type) {
+  const el = document.getElementById(containerId);
+  if (!items || !items.length) {
+    el.innerHTML = '<div class="empty-state">Geen geschiedenis beschikbaar.</div>';
+    return;
+  }
+  el.innerHTML = items.map(item => {
+    const meta     = item.meta || {};
+    const tag      = type === 'upload' ? 'upload' : (meta.source === 'restore_from_upload' || meta.source === 'restore_from_edit' ? 'restore' : 'edit');
+    const tagLabel = { upload: 'Upload', edit: 'Bewerking', restore: 'Herstel' }[tag] ?? tag;
+    const tagClass = { upload: 'tag-upload', edit: 'tag-edit', restore: 'tag-restore' }[tag] ?? '';
+    const rows     = meta.row_count ?? '?';
+    const source   = meta.source ? ` • ${meta.source}` : '';
+    const filename = meta.original_filename ? ` • ${meta.original_filename}` : '';
+    return `<div class="history-item">
+      <div class="history-info">
+        <div class="history-title">${esc(item.filename)}</div>
+        <div class="history-sub">${fmtDate(item.modified)}${filename}${source} • ${rows} rijen</div>
+      </div>
+      <div class="history-actions">
+        <span class="tag ${tagClass}">${tagLabel}</span>
+        <button class="btn-secondary btn-sm" onclick="restoreVersion('${type}','${esc(item.id)}','${esc(item.filename)}')">Herstellen</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function restoreVersion(type, id, filename) {
+  showConfirm('Versie herstellen',
+    `Wil je "${filename}" herstellen? De huidige data wordt als momentopname bewaard.`,
+    async () => {
+      try {
+        const url = type === 'upload'
+          ? `/api/history/restore/upload/${encodeURIComponent(id)}`
+          : `/api/history/restore/edit/${encodeURIComponent(id)}`;
+        const res = await POST(url, {});
+        S.excel      = res.data;
+        S.editBuffer = res.data.rows.map(r => ({ ...r }));
+        setDirty(false);
+        toast('Versie hersteld!', 'success');
+        loadHistory();
+      } catch(e) {
+        toast('Herstel mislukt: ' + e.message, 'error');
+      }
+    });
+}
+
+// ===================== SETTINGS =====================
+async function loadSettings() {
+  try {
+    const cfg = await GET('/api/settings');
+    S.settings = cfg;
+    renderSettings();
+  } catch(e) {
+    toast('Fout bij laden instellingen: ' + e.message, 'error');
+  }
+}
+
+function renderSettings() {
+  const cfg = S.settings;
+
+  // Share paths
+  document.getElementById('share-paths-list').innerHTML =
+    (cfg.share_paths || []).map((p, i) => `
+      <div class="list-item">
+        <span>${esc(p)}</span>
+        <button class="btn-danger btn-sm" onclick="removeSharePath(${i})">✕</button>
+      </div>`).join('');
+
+  // Exclude list
+  document.getElementById('exclude-list').innerHTML =
+    (cfg.exclude_shares || []).map((p, i) => `
+      <div class="list-item">
+        <span>${esc(p)}</span>
+        <button class="btn-danger btn-sm" onclick="removeExclude(${i})">✕</button>
+      </div>`).join('');
+
+  // Retention selects
+  ['upload', 'edit'].forEach(type => {
+    const sel = document.getElementById(`${type}-retention`);
+    const val = String(cfg[`${type}_retention`] || 10);
+    Array.from(sel.options).forEach(o => { o.selected = o.value === val; });
+    if (!Array.from(sel.options).some(o => o.selected)) {
+      const opt = document.createElement('option');
+      opt.value = val; opt.textContent = `${val} items`; opt.selected = true;
+      sel.appendChild(opt);
+    }
+  });
+
+  // Mailbox GB
+  const mbInput = document.getElementById('mailbox-gb');
+  mbInput.value = cfg.mailbox_gb ?? 10;
+  document.getElementById('mailbox-gb-preview').textContent = cfg.mailbox_gb ?? 10;
+  mbInput.oninput = () => {
+    document.getElementById('mailbox-gb-preview').textContent = mbInput.value || 0;
+  };
+}
+
+function addSharePath() {
+  const v = document.getElementById('new-share-path').value.trim();
+  if (!v) return;
+  S.settings.share_paths = [...(S.settings.share_paths || []), v];
+  document.getElementById('new-share-path').value = '';
+  renderSettings();
+}
+function removeSharePath(i) {
+  S.settings.share_paths.splice(i, 1);
+  renderSettings();
+}
+function addExclude() {
+  const v = document.getElementById('new-exclude').value.trim();
+  if (!v) return;
+  S.settings.exclude_shares = [...(S.settings.exclude_shares || []), v];
+  document.getElementById('new-exclude').value = '';
+  renderSettings();
+}
+function removeExclude(i) {
+  S.settings.exclude_shares.splice(i, 1);
+  renderSettings();
+}
+
+async function saveSettings() {
+  try {
+    const payload = {
+      share_paths:      S.settings.share_paths,
+      exclude_shares:   S.settings.exclude_shares,
+      upload_retention: parseInt(document.getElementById('upload-retention').value),
+      edit_retention:   parseInt(document.getElementById('edit-retention').value),
+      mailbox_gb:       parseFloat(document.getElementById('mailbox-gb').value) || 10,
+    };
+    const res = await POST('/api/settings', payload);
+    S.settings = res.config;
+    renderSettings();
+    toast('Instellingen opgeslagen!', 'success');
+  } catch(e) {
+    toast('Opslaan mislukt: ' + e.message, 'error');
+  }
+}
+
+// ===================== INIT =====================
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.addEventListener('click', () => showTab(el.dataset.tab));
+  });
+  document.getElementById('modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('modal')) closeModal();
+  });
+  window.addEventListener('beforeunload', e => {
+    if (S.dirty) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+  loadShares();
+});
+</script>
+</body>
+</html>

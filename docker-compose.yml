@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  synology-tool:
+    build: .
+    container_name: synology-storage-tool
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persistent data (Excel uploads, edit history, settings)
+      - ./data:/app/data
+      # Mount NAS volumes read-only for share scanning
+      # Add or remove volume entries to match your NAS layout
+      - /volume1:/volume1:ro
+      # - /volume2:/volume2:ro
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+      - DATA_DIR=/app/data
+      # Optionally override the default share path scanned:
+      # - SHARE_PATHS=/volume1,/volume2
+    restart: unless-stopped
+    # Run as a non-root user for better security
+    # user: "1000:1000"
