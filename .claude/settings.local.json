@@ -5,7 +5,8 @@
       "Bash(python3 -m pip install flask openpyxl -q)",
       "Bash(sudo apt-get *)",
       "Bash(python3)",
-      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/brian/projects/programming/tools/synology-tool/app.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/brian/projects/programming/tools/synology-tool/app.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/brian/projects/programming/tools/synology-tool/app.py'\\).read\\(\\)\\); print\\('app.py OK'\\)\")"
     ]
   }
 }

@@ -25,11 +25,13 @@ app = Flask(__name__, static_folder="static")
 # Paths & defaults
 # ---------------------------------------------------------------------------
 
-DATA_DIR    = Path(os.environ.get("DATA_DIR", "./data"))
-UPLOADS_DIR = DATA_DIR / "uploads"
-EDITS_DIR   = DATA_DIR / "edits"
-CURRENT_FILE = DATA_DIR / "current.json"
-CONFIG_FILE  = DATA_DIR / "config.json"
+DATA_DIR         = Path(os.environ.get("DATA_DIR", "./data"))
+UPLOADS_DIR      = DATA_DIR / "uploads"
+EDITS_DIR        = DATA_DIR / "edits"
+MAPPINGS_DIR     = DATA_DIR / "mappings_history"
+CURRENT_FILE     = DATA_DIR / "current.json"
+CONFIG_FILE      = DATA_DIR / "config.json"
+MAPPINGS_FILE    = DATA_DIR / "mappings.json"
 
 DEFAULT_CONFIG = {
     "share_paths":       ["/volume1"],
@@ -44,7 +46,7 @@ DEFAULT_CONFIG = {
 # ---------------------------------------------------------------------------
 
 def ensure_dirs():
-    for d in [DATA_DIR, UPLOADS_DIR, EDITS_DIR]:
+    for d in [DATA_DIR, UPLOADS_DIR, EDITS_DIR, MAPPINGS_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -61,6 +63,90 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
+
+# ---------------------------------------------------------------------------
+# Customer → share mappings
+# ---------------------------------------------------------------------------
+
+def load_mappings() -> dict:
+    if MAPPINGS_FILE.exists():
+        with open(MAPPINGS_FILE) as f:
+            return json.load(f)
+    return {"key_col": None, "map": {}}
+
+
+def _snapshot_mappings():
+    if not MAPPINGS_FILE.exists():
+        return
+    with open(MAPPINGS_FILE) as f:
+        old = json.load(f)
+    old["_snap_at"] = datetime.datetime.now().isoformat()
+    with open(MAPPINGS_DIR / f"{_ts()}.json", "w") as f:
+        json.dump(old, f, indent=2)
+
+
+def save_mappings(data: dict):
+    _snapshot_mappings()
+    with open(MAPPINGS_FILE, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+    cfg = load_config()
+    _apply_retention(MAPPINGS_DIR, "*.json", cfg.get("edit_retention", 10))
+
+
+def detect_key_col(headers: list) -> Optional[str]:
+    """Customer name is the key — more reliably filled than contract number."""
+    return (
+        _find_col(headers, "klant", "naam", "customer", "name") or
+        _find_col(headers, "contract")
+    )
+
+
+def compute_mapping_diff(headers: list, rows: list, mappings: dict) -> dict:
+    """
+    Apply stored mappings to rows and return a diff describing what changed.
+    Mutates rows in-place by setting row['_share'] where a mapping exists.
+    """
+    key_col  = detect_key_col(headers)
+    name_col = _find_col(headers, "klant", "naam", "customer", "name")
+    old_map  = mappings.get("map", {})
+
+    applied, new_rows, changed = [], [], []
+    seen_keys = set()
+
+    for row in rows:
+        display_name = str(row.get(key_col, "")).strip() if key_col else ""
+        if not display_name:
+            continue
+        key = display_name.lower()          # lowercase for comparison / storage
+        seen_keys.add(key)
+        # Prefer the dedicated name column for display; fall back to key column value
+        name = str(row.get(name_col, display_name)).strip() if (name_col and name_col != key_col) else display_name
+
+        if key in old_map:
+            entry = old_map[key]
+            row["_share"] = entry.get("share")
+            old_name = entry.get("name", "")
+            if old_name and name and old_name.lower() != name.lower():
+                changed.append({"key": key, "old_name": old_name, "new_name": name,
+                                 "share": entry.get("share")})
+            applied.append({"key": key, "name": name, "share": entry.get("share")})
+        else:
+            new_rows.append({"key": key, "name": name})
+
+    removed = [
+        {"key": k, "name": v.get("name", k), "share": v.get("share")}
+        for k, v in old_map.items() if k not in seen_keys
+    ]
+
+    return {
+        "key_col":  key_col,
+        "applied":  applied,
+        "new":      new_rows,
+        "removed":  removed,
+        "changed":  changed,
+        "has_diff": bool(new_rows or removed or changed),
+    }
+
 
 # ---------------------------------------------------------------------------
 # NAS share scanning
@@ -109,10 +195,25 @@ def human_size(b: int) -> str:
 @app.route("/api/shares")
 def api_shares():
     cfg = load_config()
-    shares = []
+    shares  = []
+    volumes = {}
+
     for base in cfg["share_paths"]:
         if not os.path.isdir(base):
             continue
+        # Volume-level stats (total / free disk space)
+        try:
+            st = os.statvfs(base)
+            volumes[base] = {
+                "total_bytes": st.f_blocks * st.f_frsize,
+                "free_bytes":  st.f_bfree  * st.f_frsize,
+                "used_bytes":  (st.f_blocks - st.f_bfree) * st.f_frsize,
+                "total_human": human_size(st.f_blocks * st.f_frsize),
+                "free_human":  human_size(st.f_bfree  * st.f_frsize),
+            }
+        except OSError:
+            pass
+        # Individual share sizes
         try:
             with os.scandir(base) as it:
                 for e in it:
@@ -127,14 +228,16 @@ def api_shares():
                     shares.append({
                         "name":       n,
                         "path":       e.path,
+                        "base":       base,
                         "size_bytes": sb,
                         "size_gb":    bytes_to_gb(sb),
                         "size_human": human_size(sb),
                     })
         except OSError:
             pass
+
     shares.sort(key=lambda x: x["size_bytes"], reverse=True)
-    return jsonify({"shares": shares})
+    return jsonify({"shares": shares, "volumes": volumes})
 
 # ---------------------------------------------------------------------------
 # Excel parsing / creation
@@ -302,6 +405,8 @@ def api_excel_upload():
 
     try:
         data = parse_excel(str(dest))
+        # Apply stored mappings and compute diff before saving
+        mapping_diff = compute_mapping_diff(data["headers"], data["rows"], load_mappings())
         data["_meta"] = {
             "source":            "upload",
             "original_filename": orig,
@@ -313,7 +418,7 @@ def api_excel_upload():
         _apply_retention(UPLOADS_DIR, "*.xlsx", cfg["upload_retention"])
         _apply_retention(UPLOADS_DIR, "*.xls",  cfg["upload_retention"])
         _apply_retention(EDITS_DIR,   "*.json", cfg["edit_retention"])
-        return jsonify({"success": True, "data": data})
+        return jsonify({"success": True, "data": data, "mapping_diff": mapping_diff})
     except Exception as e:
         try:
             dest.unlink()
@@ -442,6 +547,78 @@ def api_restore_edit(edit_id):
     _write_current(data)
     _apply_retention(EDITS_DIR, "*.json", cfg["edit_retention"])
     return jsonify({"success": True, "data": data})
+
+# ---------------------------------------------------------------------------
+# Mappings API routes
+# ---------------------------------------------------------------------------
+
+@app.route("/api/mappings", methods=["GET"])
+def api_mappings_get():
+    return jsonify(load_mappings())
+
+
+@app.route("/api/mappings/save", methods=["POST"])
+def api_mappings_save():
+    body = request.get_json()
+    if not body:
+        return jsonify({"error": "Geen data"}), 400
+
+    mappings = load_mappings()
+    m = dict(mappings.get("map", {}))
+
+    # Apply updates (new or changed mappings) — keys are always lowercase
+    for entry in body.get("updates", []):
+        key = str(entry.get("key", "")).strip().lower()
+        if not key:
+            continue
+        if entry.get("share"):
+            m[key] = {"share": entry["share"], "name": entry.get("name", "")}
+        elif key in m:
+            # Share explicitly cleared — remove the share but keep the entry as unmapped
+            m[key] = {"share": None, "name": entry.get("name", m[key].get("name", ""))}
+
+    # Remove entries user explicitly discarded
+    for key in body.get("remove", []):
+        m.pop(str(key), None)
+
+    mappings["map"]        = m
+    mappings["key_col"]    = body.get("key_col", mappings.get("key_col"))
+    mappings["updated_at"] = datetime.datetime.now().isoformat()
+    save_mappings(mappings)
+    return jsonify({"success": True, "mappings": mappings})
+
+
+@app.route("/api/mappings/history")
+def api_mappings_history():
+    snaps = []
+    for f in sorted(MAPPINGS_DIR.glob("*.json"),
+                    key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            with open(f) as fp:
+                d = json.load(fp)
+            snaps.append({
+                "id":       f.stem,
+                "filename": f.name,
+                "modified": datetime.datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+                "count":    len(d.get("map", {})),
+                "snap_at":  d.get("_snap_at", ""),
+            })
+        except Exception:
+            pass
+    return jsonify({"snapshots": snaps})
+
+
+@app.route("/api/mappings/restore/<snap_id>", methods=["POST"])
+def api_mappings_restore(snap_id):
+    snap_id   = Path(snap_id).name
+    snap_path = MAPPINGS_DIR / f"{snap_id}.json"
+    if not snap_path.exists():
+        return jsonify({"error": "Momentopname niet gevonden"}), 404
+    with open(snap_path) as f:
+        data = json.load(f)
+    save_mappings(data)
+    return jsonify({"success": True, "mappings": data})
+
 
 # ---------------------------------------------------------------------------
 # Settings API routes
