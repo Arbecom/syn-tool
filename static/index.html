@@ -425,6 +425,7 @@ const LANG = {
     restore_links_success: 'Links restored!', restore_links_failed: 'Restore failed: ',
     volume_info: 'Volume: {total} total, {free} free',
     scanning: 'Scanning {done} of {total}…', scan_error: 'Scan error: ',
+    scan_busy: 'Scan already in progress — showing cached data.',
   },
   nl: {
     brand: 'Opslag\nBeheer',
@@ -467,6 +468,7 @@ const LANG = {
     restore_links_success: 'Koppelingen hersteld!', restore_links_failed: 'Herstel mislukt: ',
     volume_info: 'Volume: {total} totaal, {free} vrij',
     scanning: '{done} van {total} scannen…', scan_error: 'Scan fout: ',
+    scan_busy: 'Scan al bezig — gecachte data wordt getoond.',
   },
 };
 
@@ -616,48 +618,26 @@ function showTab(tab) {
 }
 
 // ===================== DASHBOARD =====================
-function renderScanProgress(done, total, warnings) {
-  const cell = document.getElementById('scan-progress-cell');
-  if (!cell) return;
-  const pct = total > 0 ? Math.round(done / total * 100) : 0;
-  const color = pct === 100 ? 'var(--success)' : 'var(--primary)';
-  cell.innerHTML = `<div style="padding:16px 12px">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-      <div class="spinner"></div>
-      <span style="font-size:13px;color:var(--muted);flex:1">${t('scanning', {done, total: total || '…'})}</span>
-      <span style="font-size:12px;color:var(--muted)">${total ? pct + '%' : ''}</span>
-    </div>
-    <div class="bar-bg" style="height:8px">
-      <div class="bar-fill" style="width:${pct}%;background:${color};transition:width .25s"></div>
-    </div>
-    ${warnings.length ? `<div style="margin-top:8px;font-size:12px;color:var(--warning)">⚠ ${esc(warnings[warnings.length - 1])}</div>` : ''}
-  </div>`;
-}
-
 async function loadShares() {
   if (S.scanStream) { S.scanStream.close(); S.scanStream = null; }
   S.shares = [];
 
-  // Show cached results immediately so the page isn't empty on refresh
+  // Show cached results immediately so the page isn't blank on refresh
   try {
     const cached = await GET('/api/shares/cached');
     if (cached.shares && cached.shares.length) {
-      S.shares         = cached.shares;
-      S.volumes        = cached.volumes || {};
+      S.shares          = cached.shares;
+      S.volumes         = cached.volumes || {};
       S.sharesUpdatedAt = cached.scanned_at || null;
       renderShares();
+    } else {
+      document.getElementById('shares-body').innerHTML =
+        `<tr><td colspan="5" class="empty-state">${t('loading')}</td></tr>`;
     }
-  } catch(_) {}
-
-  // Prepend progress row above any cached rows (or replace if nothing cached)
-  const body = document.getElementById('shares-body');
-  const progressRow = `<tr><td colspan="5" id="scan-progress-cell"></td></tr>`;
-  if (S.shares.length) {
-    body.insertAdjacentHTML('afterbegin', progressRow);
-  } else {
-    body.innerHTML = progressRow;
+  } catch(_) {
+    document.getElementById('shares-body').innerHTML =
+      `<tr><td colspan="5" class="empty-state">${t('loading')}</td></tr>`;
   }
-  renderScanProgress(0, 0, []);
 
   if (!window.EventSource) {
     try {
@@ -677,16 +657,26 @@ async function loadShares() {
 
   es.onmessage = ev => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === 'total') {
-      S.shares = [];   // clear cached data, build fresh list from stream
-      renderScanProgress(0, msg.count, warnings);
+    if (msg.type === 'busy') {
+      // Another scan is in progress — leave cached data, show notification
+      S.scanStream = null; es.close();
+      toast(t('scan_busy'), 'warning');
+    } else if (msg.type === 'discovered') {
+      // All share names/paths known: build skeleton rows immediately
+      S.shares = msg.shares.map(sh => ({
+        ...sh, scanning: true, size_bytes: null, size_gb: null, size_human: null
+      }));
+      if (msg.volumes) S.volumes = msg.volumes;
+      renderShares();
     } else if (msg.type === 'share') {
-      S.shares.push(msg.share);
+      // One share finished: find its skeleton row and fill in real data
+      const idx = S.shares.findIndex(s => s.name === msg.share.name && s.base === msg.share.base);
+      if (idx >= 0) S.shares[idx] = {...msg.share, scanning: false};
+      else S.shares.push({...msg.share, scanning: false});
       if (msg.warning) warnings.push(`${msg.share.name}: ${msg.warning}`);
-      renderScanProgress(msg.done, msg.total, warnings);
+      renderShares();
     } else if (msg.type === 'error') {
       warnings.push(msg.message);
-      renderScanProgress(S.shares.length, S.shares.length || 1, warnings);
     } else if (msg.type === 'done') {
       S.volumes = msg.volumes || {};
       S.scanStream = null; es.close();
@@ -696,6 +686,8 @@ async function loadShares() {
 
   es.onerror = () => {
     if (S.scanStream) { S.scanStream.close(); S.scanStream = null; }
+    // Drop any shares still in skeleton state (their du never finished)
+    S.shares = S.shares.filter(s => !s.scanning);
     if (!S.shares.length) {
       document.getElementById('shares-body').innerHTML =
         `<tr><td colspan="5" style="color:var(--danger);padding:16px">${t('scan_error')}Connection lost</td></tr>`;
@@ -720,28 +712,44 @@ function sortSharesBy(col) {
 }
 
 function renderShares() {
-  const shares = [...S.shares].sort((a, b) => {
+  // Split into completed and still-scanning shares
+  const completedShares = S.shares.filter(s => !s.scanning);
+  const scanningShares  = S.shares.filter(s => s.scanning);
+
+  // Completed shares sorted by current sort column; scanning shares always at bottom (by name)
+  const sortedCompleted = [...completedShares].sort((a, b) => {
     const va = a[S.shareSort.col] ?? '', vb = b[S.shareSort.col] ?? '';
     const na = parseFloat(va), nb = parseFloat(vb);
     let cmp = (!isNaN(na) && !isNaN(nb)) ? na - nb : String(va).localeCompare(String(vb));
     return S.shareSort.dir === 'asc' ? cmp : -cmp;
   });
+  const sortedScanning = [...scanningShares].sort((a, b) => a.name.localeCompare(b.name));
+  const shares = [...sortedCompleted, ...sortedScanning];
 
+  // Progress text or last-updated timestamp in the card header
   const updEl = document.getElementById('shares-updated');
-  if (updEl) updEl.textContent = S.sharesUpdatedAt ? t('updated') + ': ' + fmtDate(S.sharesUpdatedAt) : '';
-
-  const totalB = shares.reduce((s, x) => s + x.size_bytes, 0);
-  document.getElementById('stat-total').textContent  = fmtBytes(totalB);
-  document.getElementById('stat-count').textContent  = shares.length;
-  document.getElementById('stat-excel-rows').textContent = S.editBuffer.length || (S.excel.rows ? S.excel.rows.length : '—');
-  if (shares.length) {
-    // largest by bytes (always from sorted-by-size perspective)
-    const biggest = [...S.shares].sort((a,b) => b.size_bytes - a.size_bytes)[0];
-    document.getElementById('stat-largest').textContent     = biggest.size_human;
-    document.getElementById('stat-largest-name').textContent = biggest.name;
+  if (updEl) {
+    if (S.scanStream && S.shares.length > 0) {
+      updEl.textContent = t('scanning', {done: completedShares.length, total: S.shares.length});
+    } else {
+      updEl.textContent = S.sharesUpdatedAt ? t('updated') + ': ' + fmtDate(S.sharesUpdatedAt) : '';
+    }
   }
 
-  // Update sort indicators
+  const totalB = completedShares.reduce((s, x) => s + (x.size_bytes || 0), 0);
+  document.getElementById('stat-total').textContent  = completedShares.length ? fmtBytes(totalB) : '—';
+  document.getElementById('stat-count').textContent  = S.shares.length || '—';
+  document.getElementById('stat-excel-rows').textContent = S.editBuffer.length || (S.excel.rows ? S.excel.rows.length : '—');
+  if (completedShares.length) {
+    const biggest = [...completedShares].sort((a, b) => b.size_bytes - a.size_bytes)[0];
+    document.getElementById('stat-largest').textContent      = biggest.size_human;
+    document.getElementById('stat-largest-name').textContent = biggest.name;
+  } else {
+    document.getElementById('stat-largest').textContent      = '—';
+    document.getElementById('stat-largest-name').textContent = '';
+  }
+
+  // Sort indicators
   document.querySelectorAll('#shares-table thead th').forEach(th => {
     const col = th.getAttribute('onclick')?.match(/sortSharesBy\('(\w+)'\)/)?.[1];
     if (!col) return;
@@ -758,6 +766,20 @@ function renderShares() {
   }
 
   document.getElementById('shares-body').innerHTML = shares.map(s => {
+    if (s.scanning) {
+      return `<tr>
+        <td><strong>${esc(s.name)}</strong></td>
+        <td class="cell-muted cell-mono">${esc(s.path)}</td>
+        <td><div style="display:flex;align-items:center;gap:6px"><div class="spinner"></div></div></td>
+        <td class="cell-mono" style="color:var(--muted)">—</td>
+        <td>
+          <div class="bar-wrap">
+            <div class="bar-bg"><div class="bar-fill" style="width:0%;background:var(--primary)"></div></div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">…</div>
+          </div>
+        </td>
+      </tr>`;
+    }
     const volTotal = getVolumeTotal(s.path);
     const denom    = volTotal || totalB || 1;
     const pct      = Math.min(100, (s.size_bytes / denom * 100));
