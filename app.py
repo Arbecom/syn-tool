@@ -156,55 +156,61 @@ def compute_mapping_diff(headers: list, rows: list, mappings: dict) -> dict:
 # NAS share scanning
 # ---------------------------------------------------------------------------
 
-def _btrfs_qgroup_bytes(path: str) -> Optional[int]:
-    """Return btrfs qgroup referenced bytes for a specific subvolume, or None.
-    Synology btrfs volumes have qgroups enabled and each share is its own subvolume.
-    This matches the DSM 'folder size' and avoids du overcounting deduplicated extents.
-
-    Two-step: get this path's subvolume ID, then find its qgroup in the full list.
-    (btrfs qgroup show PATH lists ALL qgroups for the filesystem, not just this one.)
-    """
+def _btrfs_all_sizes(base: str) -> dict:
+    """Return {full_path: size_bytes} for all direct-child subvolumes under base.
+    Uses exactly 2 commands for the whole volume — fast, dedup-correct, matches DSM.
+    Returns empty dict if btrfs is unavailable or qgroups are disabled."""
     try:
-        # Step 1 — resolve the subvolume ID for this exact path
+        # Command 1: map subvolume ID → relative path for direct children only
         rs = subprocess.run(
-            ["btrfs", "subvolume", "show", path],
-            capture_output=True, text=True, timeout=10
+            ["btrfs", "subvolume", "list", base],
+            capture_output=True, text=True, timeout=30
         )
         if rs.returncode != 0:
-            return None
-        subvol_id = None
-        for line in rs.stdout.split('\n'):
-            if 'Subvolume ID:' in line:
-                subvol_id = line.split()[-1].strip()
-                break
-        if not subvol_id:
-            return None
+            return {}
 
-        # Step 2 — look up exactly qgroup 0/<subvol_id>
-        target = f'0/{subvol_id}'
+        id_to_name: dict = {}
+        for line in rs.stdout.strip().split('\n'):
+            # Format: "ID 258 gen 123 top level 5 path ShareName"
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == 'ID':
+                try:
+                    path_idx = parts.index('path')
+                    relpath = ' '.join(parts[path_idx + 1:])
+                    # Direct children only (no slash = not nested)
+                    if '/' not in relpath:
+                        id_to_name[parts[1]] = relpath
+                except (ValueError, IndexError):
+                    pass
+
+        if not id_to_name:
+            return {}
+
+        # Command 2: get qgroup sizes for all subvolumes in one shot
         rq = subprocess.run(
-            ["btrfs", "qgroup", "show", "--raw", path],
+            ["btrfs", "qgroup", "show", "--raw", base],
             capture_output=True, text=True, timeout=30
         )
         if rq.returncode != 0:
-            return None
-        for line in rq.stdout.split('\n'):
+            return {}
+
+        result: dict = {}
+        for line in rq.stdout.strip().split('\n'):
+            # Format: "0/258   <rfer_bytes>   <excl_bytes>"
             parts = line.split()
-            # Data rows: 0/<id>   <rfer_bytes>   <excl_bytes>
-            if len(parts) >= 2 and parts[0] == target:
-                return int(parts[1])   # rfer = total referenced bytes
+            if len(parts) >= 2 and parts[0].startswith('0/'):
+                subvol_id = parts[0][2:]
+                if subvol_id in id_to_name:
+                    full_path = os.path.join(base, id_to_name[subvol_id])
+                    result[full_path] = int(parts[1])   # rfer = referenced bytes
+
+        return result
     except Exception:
-        pass
-    return None
+        return {}
 
 
-def _measure_share(path: str):
-    """Return (size_bytes, warning_or_None) for a share path.
-    Prefers btrfs qgroups (dedup-correct, matches DSM), falls back to du -sk."""
-    btrfs_b = _btrfs_qgroup_bytes(path)
-    if btrfs_b is not None:
-        return btrfs_b, None
-
+def _du_size(path: str):
+    """Return (size_bytes, warning_or_None) using du -sk. Fallback when btrfs unavailable."""
     try:
         r = subprocess.run(
             ["du", "-sk", path],
@@ -222,7 +228,7 @@ def _measure_share(path: str):
 
 def dir_size_bytes(path: str) -> int:
     """Return actual disk usage in bytes."""
-    sb, _ = _measure_share(path)
+    sb, _ = _du_size(path)
     if sb:
         return sb
     # Final fallback: scandir walk
@@ -350,7 +356,7 @@ def api_shares_stream():
 
             total = len(shares_to_scan)
 
-            # Tell the browser which shares exist before any du runs (skeleton rows)
+            # Tell the browser which shares exist before any sizing runs (skeleton rows)
             discovered = [{"name": n, "path": p, "base": b} for b, p, n in shares_to_scan]
             yield f'data: {json.dumps({"type":"discovered","shares":discovered,"volumes":volumes})}\n\n'
 
@@ -358,26 +364,33 @@ def api_shares_stream():
                 yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
                 return
 
+            # Bulk-fetch btrfs qgroup sizes for all bases (2 commands per volume, not per share)
+            btrfs_sizes: dict = {}
+            for base in set(b for b, p, n in shares_to_scan):
+                btrfs_sizes.update(_btrfs_all_sizes(base))
+
             result_q: queue.Queue = queue.Queue()
             lock = threading.Lock()
             completed = [0]
-            sem = threading.Semaphore(4)
+            sem = threading.Semaphore(4)   # only used when falling back to du -sk
 
             def scan_one(base, path, name):
-                with sem:
-                    sb, warning = _measure_share(path)
-                    share = {
-                        "name": name, "path": path, "base": base,
-                        "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
-                    }
-                    with lock:
-                        completed[0] += 1
-                        done = completed[0]
-
-                    msg: dict = {"type": "share", "share": share, "done": done, "total": total}
-                    if warning:
-                        msg["warning"] = warning
-                    result_q.put(msg)
+                if path in btrfs_sizes:
+                    sb, warning = btrfs_sizes[path], None
+                else:
+                    with sem:
+                        sb, warning = _du_size(path)
+                share = {
+                    "name": name, "path": path, "base": base,
+                    "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
+                }
+                with lock:
+                    completed[0] += 1
+                    done = completed[0]
+                msg: dict = {"type": "share", "share": share, "done": done, "total": total}
+                if warning:
+                    msg["warning"] = warning
+                result_q.put(msg)
 
             for base, path, name in shares_to_scan:
                 threading.Thread(target=scan_one, args=(base, path, name), daemon=True).start()
@@ -890,19 +903,26 @@ def _scan_and_cache_locked():
         except OSError:
             pass
 
+    btrfs_sizes: dict = {}
+    for base in set(b for b, p, n in shares_to_scan):
+        btrfs_sizes.update(_btrfs_all_sizes(base))
+
     all_shares: list = []
     lock = threading.Lock()
     sem = threading.Semaphore(4)
 
     def scan_one(base, path, name):
-        with sem:
-            sb, _ = _measure_share(path)
-            share = {
-                "name": name, "path": path, "base": base,
-                "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
-            }
-            with lock:
-                all_shares.append(share)
+        if path in btrfs_sizes:
+            sb = btrfs_sizes[path]
+        else:
+            with sem:
+                sb, _ = _du_size(path)
+        share = {
+            "name": name, "path": path, "base": base,
+            "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
+        }
+        with lock:
+            all_shares.append(share)
 
     threads = [
         threading.Thread(target=scan_one, args=(b, p, n), daemon=True)
