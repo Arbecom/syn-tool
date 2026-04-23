@@ -209,8 +209,42 @@ def _btrfs_all_sizes(base: str) -> dict:
         return {}
 
 
+def _btrfs_single_size(path: str) -> Optional[int]:
+    """Per-share btrfs qgroup lookup via subvolume show + qgroup show.
+    Uses a different kernel ioctl than the bulk list approach — works in more contexts
+    (e.g. Docker bind mounts where subvolume list misses some entries)."""
+    try:
+        rs = subprocess.run(
+            ["btrfs", "subvolume", "show", path],
+            capture_output=True, text=True, timeout=10
+        )
+        if rs.returncode != 0:
+            return None
+        subvol_id = None
+        for line in rs.stdout.split('\n'):
+            if 'Subvolume ID:' in line:
+                subvol_id = line.split()[-1].strip()
+                break
+        if not subvol_id:
+            return None
+        target = f'0/{subvol_id}'
+        rq = subprocess.run(
+            ["btrfs", "qgroup", "show", "--raw", path],
+            capture_output=True, text=True, timeout=30
+        )
+        if rq.returncode != 0:
+            return None
+        for line in rq.stdout.split('\n'):
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == target:
+                return int(parts[1])
+    except Exception:
+        pass
+    return None
+
+
 def _du_size(path: str):
-    """Return (size_bytes, warning_or_None) using du -sk. Fallback when btrfs unavailable."""
+    """Return (size_bytes, warning_or_None) using du -sk. Last resort when btrfs unavailable."""
     try:
         r = subprocess.run(
             ["du", "-sk", path],
@@ -378,8 +412,12 @@ def api_shares_stream():
                 if path in btrfs_sizes:
                     sb, warning = btrfs_sizes[path], None
                 else:
-                    with sem:
-                        sb, warning = _du_size(path)
+                    btrfs_b = _btrfs_single_size(path)
+                    if btrfs_b is not None:
+                        sb, warning = btrfs_b, None
+                    else:
+                        with sem:
+                            sb, warning = _du_size(path)
                 share = {
                     "name": name, "path": path, "base": base,
                     "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
@@ -915,8 +953,12 @@ def _scan_and_cache_locked():
         if path in btrfs_sizes:
             sb = btrfs_sizes[path]
         else:
-            with sem:
-                sb, _ = _du_size(path)
+            btrfs_b = _btrfs_single_size(path)
+            if btrfs_b is not None:
+                sb = btrfs_b
+            else:
+                with sem:
+                    sb, _ = _du_size(path)
         share = {
             "name": name, "path": path, "base": base,
             "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
