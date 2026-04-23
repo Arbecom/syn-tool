@@ -213,18 +213,25 @@ def _btrfs_sizes_for_paths(paths: list, base: str) -> dict:
     level1: dict = {}
     for line in rq.stdout.split('\n'):
         parts = line.split()
-        # columns: qgroupid  rfer  excl — need at least 3; use excl (physical space, matches DSM)
-        if len(parts) >= 3 and '/' in parts[0]:
+        if len(parts) >= 2 and '/' in parts[0]:
             qlevel, sid = parts[0].split('/', 1)
             if sid in id_to_path:
                 p = id_to_path[sid]
-                excl = int(parts[2])
+                rfer = int(parts[1])
                 if qlevel == '1':
-                    level1[p] = excl
+                    level1[p] = rfer
                 elif qlevel == '0':
-                    level0[p] = excl
+                    level0[p] = rfer
 
-    return {**level0, **level1}   # level-1 wins where both exist
+    # level-0 wins when non-zero (e.g. ActiveBackupforBusiness: l0=154GB, l1=585GB inflated)
+    # level-1 used only when level-0 is zero (e.g. Office365BackUp: data in nested subvolumes)
+    result: dict = {}
+    for path in set(list(level0.keys()) + list(level1.keys())):
+        if level0.get(path, 0) > 0:
+            result[path] = level0[path]
+        elif path in level1:
+            result[path] = level1[path]
+    return result
 
 
 def _du_size(path: str):
