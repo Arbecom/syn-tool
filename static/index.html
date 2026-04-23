@@ -176,6 +176,8 @@ tbody td { padding:8px 12px; vertical-align:middle; overflow:hidden; }
 .toast.warning { background:var(--warning); }
 .toast.fading  { opacity:0; }
 .empty-state { text-align:center; padding:40px 24px; color:var(--muted); }
+@keyframes spin { to { transform:rotate(360deg); } }
+.spinner { width:14px; height:14px; border:2px solid var(--border); border-top-color:var(--primary); border-radius:50%; animation:spin .7s linear infinite; display:inline-block; vertical-align:middle; flex-shrink:0; }
 </style>
 </head>
 <body>
@@ -243,7 +245,7 @@ tbody td { padding:8px 12px; vertical-align:middle; overflow:hidden; }
                 <thead><tr>
                   <th onclick="sortSharesBy('name')"    style="width:160px"><div class="th-inner"><span class="th-text" data-i18n="col_name"></span><span class="sort-icon">↕</span></div></th>
                   <th onclick="sortSharesBy('path')"    style="width:200px"><div class="th-inner"><span class="th-text" data-i18n="col_path"></span><span class="sort-icon">↕</span></div></th>
-                  <th onclick="sortSharesBy('size_human')" style="width:100px"><div class="th-inner"><span class="th-text" data-i18n="col_size"></span><span class="sort-icon">↕</span></div></th>
+                  <th onclick="sortSharesBy('size_bytes')" style="width:100px"><div class="th-inner"><span class="th-text" data-i18n="col_size"></span><span class="sort-icon">↕</span></div></th>
                   <th onclick="sortSharesBy('size_gb')" style="width:90px"><div class="th-inner"><span class="th-text" data-i18n="col_gb"></span><span class="sort-icon">↕</span></div></th>
                   <th class="no-sort" style="width:160px"><div class="th-inner"><span class="th-text" data-i18n="col_usage"></span></div></th>
                 </tr></thead>
@@ -388,7 +390,7 @@ const LANG = {
     nav_history: 'History',    nav_settings: 'Settings',
     stat_total: 'Total Storage', stat_count: 'Shares', stat_largest: 'Largest Share', stat_excel_rows: 'Customers in Excel',
     nas_shares: 'NAS Shares', refresh: 'Refresh',
-    col_name: 'Share Name', col_path: 'Path', col_size: 'Size', col_gb: 'GB', col_usage: 'Usage',
+    col_name: 'Share Name', col_path: 'Path', col_size: 'Size', col_gb: 'Size (GB)', col_usage: 'Usage',
     loading: 'Loading…', no_shares: 'No shares found. Check share paths in Settings.',
     updated: 'Updated',
     upload_excel: 'Upload Excel', export_excel: 'Export (.xlsx)', save: 'Save',
@@ -430,7 +432,7 @@ const LANG = {
     nav_history: 'Geschiedenis', nav_settings: 'Instellingen',
     stat_total: 'Totale opslag', stat_count: 'Shares', stat_largest: 'Grootste share', stat_excel_rows: 'Klanten in Excel',
     nas_shares: 'NAS Shares', refresh: 'Vernieuwen',
-    col_name: 'Share naam', col_path: 'Pad', col_size: 'Grootte', col_gb: 'GB', col_usage: 'Gebruik',
+    col_name: 'Share naam', col_path: 'Pad', col_size: 'Grootte', col_gb: 'Grootte (GB)', col_usage: 'Gebruik',
     loading: 'Laden…', no_shares: 'Geen shares gevonden. Controleer de share paden in Instellingen.',
     updated: 'Bijgewerkt',
     upload_excel: 'Excel uploaden', export_excel: 'Exporteren (.xlsx)', save: 'Opslaan',
@@ -518,7 +520,7 @@ function reRenderCurrentTab() {
 
 // ===================== STATE =====================
 const S = {
-  shares: [], volumes: {}, scanStream: null,
+  shares: [], volumes: {}, scanStream: null, sharesUpdatedAt: null,
   shareSort: { col: 'size_bytes', dir: 'desc' },
   excel:  { headers: [], rows: [], _meta: {} },
   editBuffer: [],
@@ -620,8 +622,9 @@ function renderScanProgress(done, total, warnings) {
   const pct = total > 0 ? Math.round(done / total * 100) : 0;
   const color = pct === 100 ? 'var(--success)' : 'var(--primary)';
   cell.innerHTML = `<div style="padding:16px 12px">
-    <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-      <span style="font-size:13px;color:var(--muted)">${t('scanning', {done, total: total || '…'})}</span>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <div class="spinner"></div>
+      <span style="font-size:13px;color:var(--muted);flex:1">${t('scanning', {done, total: total || '…'})}</span>
       <span style="font-size:12px;color:var(--muted)">${total ? pct + '%' : ''}</span>
     </div>
     <div class="bar-bg" style="height:8px">
@@ -634,8 +637,26 @@ function renderScanProgress(done, total, warnings) {
 async function loadShares() {
   if (S.scanStream) { S.scanStream.close(); S.scanStream = null; }
   S.shares = [];
-  document.getElementById('shares-body').innerHTML =
-    `<tr><td colspan="5" id="scan-progress-cell"></td></tr>`;
+
+  // Show cached results immediately so the page isn't empty on refresh
+  try {
+    const cached = await GET('/api/shares/cached');
+    if (cached.shares && cached.shares.length) {
+      S.shares         = cached.shares;
+      S.volumes        = cached.volumes || {};
+      S.sharesUpdatedAt = cached.scanned_at || null;
+      renderShares();
+    }
+  } catch(_) {}
+
+  // Prepend progress row above any cached rows (or replace if nothing cached)
+  const body = document.getElementById('shares-body');
+  const progressRow = `<tr><td colspan="5" id="scan-progress-cell"></td></tr>`;
+  if (S.shares.length) {
+    body.insertAdjacentHTML('afterbegin', progressRow);
+  } else {
+    body.innerHTML = progressRow;
+  }
   renderScanProgress(0, 0, []);
 
   if (!window.EventSource) {
@@ -657,6 +678,7 @@ async function loadShares() {
   es.onmessage = ev => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'total') {
+      S.shares = [];   // clear cached data, build fresh list from stream
       renderScanProgress(0, msg.count, warnings);
     } else if (msg.type === 'share') {
       S.shares.push(msg.share);
@@ -684,14 +706,14 @@ async function loadShares() {
 }
 
 function _onScanDone(warnings) {
+  S.sharesUpdatedAt = new Date().toISOString();
   renderShares();
   warnings.forEach(w => toast(w, 'warning'));
-  document.getElementById('shares-updated').textContent =
-    t('updated') + ': ' + new Date().toLocaleTimeString(lang === 'nl' ? 'nl-NL' : 'en-GB');
   document.getElementById('sync-btn').disabled = !S.shares.length || !S.editBuffer.length;
 }
 
 function sortSharesBy(col) {
+  if (S.scanStream) return;   // sorting disabled while scan is in progress
   if (S.shareSort.col === col) S.shareSort.dir = S.shareSort.dir === 'asc' ? 'desc' : 'asc';
   else { S.shareSort.col = col; S.shareSort.dir = col === 'size_bytes' || col === 'size_gb' ? 'desc' : 'asc'; }
   renderShares();
@@ -704,6 +726,9 @@ function renderShares() {
     let cmp = (!isNaN(na) && !isNaN(nb)) ? na - nb : String(va).localeCompare(String(vb));
     return S.shareSort.dir === 'asc' ? cmp : -cmp;
   });
+
+  const updEl = document.getElementById('shares-updated');
+  if (updEl) updEl.textContent = S.sharesUpdatedAt ? t('updated') + ': ' + fmtDate(S.sharesUpdatedAt) : '';
 
   const totalB = shares.reduce((s, x) => s + x.size_bytes, 0);
   document.getElementById('stat-total').textContent  = fmtBytes(totalB);

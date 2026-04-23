@@ -12,6 +12,8 @@ import json
 import subprocess
 import datetime
 import io
+import threading
+import queue
 from pathlib import Path
 from typing import Optional
 from flask import Flask, request, jsonify, send_file, send_from_directory, Response
@@ -153,14 +155,14 @@ def compute_mapping_diff(headers: list, rows: list, mappings: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def dir_size_bytes(path: str) -> int:
-    """Return total size in bytes. Uses 'du -sb' for speed, falls back to walk."""
+    """Return actual disk usage in bytes. Uses 'du -sk' (real blocks, not apparent size)."""
     try:
         r = subprocess.run(
-            ["du", "-sb", path],
+            ["du", "-sk", path],
             capture_output=True, text=True, timeout=60
         )
         if r.returncode == 0:
-            return int(r.stdout.split()[0])
+            return int(r.stdout.split()[0]) * 1024
     except Exception:
         pass
     # Fallback: scandir walk
@@ -242,7 +244,8 @@ def api_shares():
 
 @app.route("/api/shares/stream")
 def api_shares_stream():
-    """SSE endpoint: streams each share result as it finishes scanning."""
+    """SSE endpoint: scans shares in parallel, streams results as they finish.
+    Sends keepalive comments every 0.5s so the connection doesn't time out."""
     cfg = load_config()
 
     def generate():
@@ -281,33 +284,73 @@ def api_shares_stream():
         total = len(shares_to_scan)
         yield f'data: {json.dumps({"type":"total","count":total})}\n\n'
 
-        for done, (base, path, name) in enumerate(shares_to_scan, 1):
-            warning = None
-            try:
-                r = subprocess.run(
-                    ["du", "-sb", path],
-                    capture_output=True, text=True, timeout=300
-                )
-                if r.returncode == 0:
-                    sb = int(r.stdout.split()[0])
-                else:
-                    sb = 0
-                    warning = (r.stderr.strip() or "Could not read size").split("\n")[0]
-            except subprocess.TimeoutExpired:
-                sb = 0
-                warning = "Scan timed out"
-            except Exception as ex:
-                sb = 0
-                warning = str(ex)
+        if not total:
+            yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
+            return
 
-            share = {
-                "name": name, "path": path, "base": base,
-                "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
+        result_q: queue.Queue = queue.Queue()
+        lock = threading.Lock()
+        completed = [0]
+        all_shares: list = []
+        sem = threading.Semaphore(4)   # max 4 concurrent du processes
+
+        def scan_one(base, path, name):
+            with sem:
+                warning = None
+                try:
+                    r = subprocess.run(
+                        ["du", "-sk", path],
+                        capture_output=True, text=True, timeout=300
+                    )
+                    if r.returncode == 0:
+                        sb = int(r.stdout.split()[0]) * 1024
+                    else:
+                        sb = 0
+                        warning = (r.stderr.strip() or "Could not read size").split("\n")[0]
+                except subprocess.TimeoutExpired:
+                    sb = 0
+                    warning = "Scan timed out"
+                except Exception as ex:
+                    sb = 0
+                    warning = str(ex)
+
+                share = {
+                    "name": name, "path": path, "base": base,
+                    "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
+                }
+                with lock:
+                    completed[0] += 1
+                    done = completed[0]
+                    all_shares.append(share)
+
+                msg: dict = {"type": "share", "share": share, "done": done, "total": total}
+                if warning:
+                    msg["warning"] = warning
+                result_q.put(msg)
+
+        for base, path, name in shares_to_scan:
+            threading.Thread(target=scan_one, args=(base, path, name), daemon=True).start()
+
+        received = 0
+        while received < total:
+            try:
+                msg = result_q.get(timeout=0.5)
+                received += 1
+                yield f'data: {json.dumps(msg)}\n\n'
+            except queue.Empty:
+                yield ': keepalive\n\n'   # SSE comment — keeps connection alive
+
+        # Persist results so the next page load can show them immediately
+        try:
+            cache = {
+                "shares":     all_shares,
+                "volumes":    volumes,
+                "scanned_at": datetime.datetime.now().isoformat(),
             }
-            msg: dict = {"type": "share", "share": share, "done": done, "total": total}
-            if warning:
-                msg["warning"] = warning
-            yield f'data: {json.dumps(msg)}\n\n'
+            with open(DATA_DIR / "shares_cache.json", "w") as f:
+                json.dump(cache, f, default=str)
+        except Exception:
+            pass
 
         yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
 
@@ -316,6 +359,15 @@ def api_shares_stream():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+@app.route("/api/shares/cached")
+def api_shares_cached():
+    cache_file = DATA_DIR / "shares_cache.json"
+    if cache_file.exists():
+        with open(cache_file) as f:
+            return jsonify(json.load(f))
+    return jsonify({"shares": [], "volumes": {}, "scanned_at": None})
+
 
 # ---------------------------------------------------------------------------
 # Excel parsing / creation
@@ -737,6 +789,85 @@ def api_settings_post():
     return jsonify({"success": True, "config": cfg})
 
 # ---------------------------------------------------------------------------
+# Background scan
+# ---------------------------------------------------------------------------
+
+def _scan_and_cache():
+    """Scan all shares in parallel and write shares_cache.json. Safe to call from any thread."""
+    ensure_dirs()
+    cfg = load_config()
+    shares_to_scan = []
+    volumes = {}
+
+    for base in cfg["share_paths"]:
+        if not os.path.isdir(base):
+            continue
+        try:
+            st = os.statvfs(base)
+            volumes[base] = {
+                "total_bytes": st.f_blocks * st.f_frsize,
+                "free_bytes":  st.f_bfree  * st.f_frsize,
+                "used_bytes":  (st.f_blocks - st.f_bfree) * st.f_frsize,
+                "total_human": human_size(st.f_blocks * st.f_frsize),
+                "free_human":  human_size(st.f_bfree  * st.f_frsize),
+            }
+        except OSError:
+            pass
+        try:
+            with os.scandir(base) as it:
+                for e in it:
+                    if not e.is_dir(follow_symlinks=False):
+                        continue
+                    n = e.name
+                    if n in cfg["exclude_shares"] or n.startswith(("@", "#")):
+                        continue
+                    shares_to_scan.append((base, e.path, n))
+        except OSError:
+            pass
+
+    all_shares: list = []
+    lock = threading.Lock()
+    sem = threading.Semaphore(4)
+
+    def scan_one(base, path, name):
+        with sem:
+            try:
+                r = subprocess.run(
+                    ["du", "-sk", path], capture_output=True, text=True, timeout=300
+                )
+                sb = int(r.stdout.split()[0]) * 1024 if r.returncode == 0 else 0
+            except Exception:
+                sb = 0
+            share = {
+                "name": name, "path": path, "base": base,
+                "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
+            }
+            with lock:
+                all_shares.append(share)
+
+    threads = [
+        threading.Thread(target=scan_one, args=(b, p, n), daemon=True)
+        for b, p, n in shares_to_scan
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    all_shares.sort(key=lambda x: x["size_bytes"], reverse=True)
+    try:
+        cache = {
+            "shares":     all_shares,
+            "volumes":    volumes,
+            "scanned_at": datetime.datetime.now().isoformat(),
+        }
+        with open(DATA_DIR / "shares_cache.json", "w") as f:
+            json.dump(cache, f, default=str)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -747,4 +878,6 @@ if __name__ == "__main__":
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
     print(f"Synology Storage Tool  →  http://{host}:{port}")
     print(f"Data directory         →  {DATA_DIR.resolve()}")
-    app.run(host=host, port=port, debug=debug)
+    # Pre-populate the share cache before the first browser visit
+    threading.Thread(target=_scan_and_cache, daemon=True).start()
+    app.run(host=host, port=port, debug=debug, threaded=True)
