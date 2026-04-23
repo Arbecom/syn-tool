@@ -213,15 +213,16 @@ def _btrfs_sizes_for_paths(paths: list, base: str) -> dict:
     level1: dict = {}
     for line in rq.stdout.split('\n'):
         parts = line.split()
-        if len(parts) >= 2 and '/' in parts[0]:
+        # columns: qgroupid  rfer  excl — need at least 3; use excl (physical space, matches DSM)
+        if len(parts) >= 3 and '/' in parts[0]:
             qlevel, sid = parts[0].split('/', 1)
             if sid in id_to_path:
                 p = id_to_path[sid]
-                rfer = int(parts[1])
+                excl = int(parts[2])
                 if qlevel == '1':
-                    level1[p] = rfer   # includes nested subvolumes — matches DSM
+                    level1[p] = excl
                 elif qlevel == '0':
-                    level0[p] = rfer
+                    level0[p] = excl
 
     return {**level0, **level1}   # level-1 wins where both exist
 
