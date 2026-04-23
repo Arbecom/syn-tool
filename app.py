@@ -157,20 +157,41 @@ def compute_mapping_diff(headers: list, rows: list, mappings: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _btrfs_qgroup_bytes(path: str) -> Optional[int]:
-    """Return btrfs qgroup referenced bytes for a subvolume path, or None.
-    Synology enables qgroups on btrfs volumes; this matches the DSM 'folder size' figure
-    and correctly handles block-level deduplication (du -sk overcounts shared extents)."""
+    """Return btrfs qgroup referenced bytes for a specific subvolume, or None.
+    Synology btrfs volumes have qgroups enabled and each share is its own subvolume.
+    This matches the DSM 'folder size' and avoids du overcounting deduplicated extents.
+
+    Two-step: get this path's subvolume ID, then find its qgroup in the full list.
+    (btrfs qgroup show PATH lists ALL qgroups for the filesystem, not just this one.)
+    """
     try:
-        r = subprocess.run(
+        # Step 1 — resolve the subvolume ID for this exact path
+        rs = subprocess.run(
+            ["btrfs", "subvolume", "show", path],
+            capture_output=True, text=True, timeout=10
+        )
+        if rs.returncode != 0:
+            return None
+        subvol_id = None
+        for line in rs.stdout.split('\n'):
+            if 'Subvolume ID:' in line:
+                subvol_id = line.split()[-1].strip()
+                break
+        if not subvol_id:
+            return None
+
+        # Step 2 — look up exactly qgroup 0/<subvol_id>
+        target = f'0/{subvol_id}'
+        rq = subprocess.run(
             ["btrfs", "qgroup", "show", "--raw", path],
             capture_output=True, text=True, timeout=30
         )
-        if r.returncode != 0:
+        if rq.returncode != 0:
             return None
-        for line in reversed(r.stdout.strip().split('\n')):
+        for line in rq.stdout.split('\n'):
             parts = line.split()
-            # Data rows look like:  0/258   <rfer_bytes>   <excl_bytes>
-            if len(parts) >= 2 and parts[0].startswith('0/'):
+            # Data rows: 0/<id>   <rfer_bytes>   <excl_bytes>
+            if len(parts) >= 2 and parts[0] == target:
                 return int(parts[1])   # rfer = total referenced bytes
     except Exception:
         pass
