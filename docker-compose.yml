@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   synology-tool:
-    build: .
+    image: syn-tool
     container_name: syn-tool
     ports:
       - "9000:9000"
