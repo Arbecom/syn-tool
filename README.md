@@ -8,33 +8,70 @@ Default login: **admin / admin** — change in Settings after first login.
 
 ## Option A — Docker / Container Manager (DSM 7.2+)
 
-**1. Clone the repo:**
+### 1. Install required packages
+
+Open **Package Center** and install:
+- **Git Server**
+- **Container Manager**
+
+### 2. Enable SSH
+
+**Control Panel → Terminal & SNMP → Terminal** → enable SSH service.
+
+Connect via SSH:
+```sh
+ssh <your-user>@<NAS-IP>
+```
+
+### 3. Clone the repo
+
 ```sh
 sudo git clone https://github.com/Applejuicelolmc/syn-tool.git /volume1/tools/syn-tool
 ```
 
-**2. Set up as a Project:**
+### 4. Set up the project in Container Manager
+
 1. Open **Container Manager → Project → Create**
-2. Set path to `/volume1/tools/syn-tool`
-3. Container Manager detects `docker-compose.yml` automatically
-4. Click through — it pulls the image and starts
+2. Set the path to `/volume1/tools/syn-tool`
+3. Container Manager detects `docker-compose.yml` automatically — click through
+4. It pulls the image and starts the container
 
 Open `http://<NAS-IP>:9000`
 
-**Updating (after a code push):**
-1. **Project → syn-tool → Actie → Stoppen**
-2. **Image → select `ghcr.io/applejuicelolmc/syn-tool` → Delete**
-3. **Project → syn-tool → Actie → Starten** — pulls the new image and starts
+---
 
-> The Docker image is built automatically on every push via GitHub Actions. No building on the NAS required.
+### Updating
+
+1. **Project → syn-tool → Action → Stop**
+2. **Container → select `syn-tool` → Delete**
+3. **Image → select `ghcr.io/applejuicelolmc/syn-tool` → Delete**
+4. SSH into the NAS and pull the latest `docker-compose.yml`:
+   ```sh
+   cd /volume1/tools/syn-tool && sudo git pull
+   ```
+5. **Project → syn-tool → Action → Start** — pulls the new image and starts
 
 ---
 
 ## Option B — Standalone Python (DSM 7.0+)
 
-**1. Install Python 3.9** via Synology Package Center.
+### 1. Install required packages
 
-**2. Clone and install:**
+Open **Package Center** and install:
+- **Git Server**
+- **Python 3.9**
+
+### 2. Enable SSH
+
+**Control Panel → Terminal & SNMP → Terminal** → enable SSH service.
+
+Connect via SSH:
+```sh
+ssh <your-user>@<NAS-IP>
+```
+
+### 3. Clone and install
+
 ```sh
 sudo git clone https://github.com/Applejuicelolmc/syn-tool.git /volume1/tools/syn-tool
 cd /volume1/tools/syn-tool
@@ -44,15 +81,12 @@ sudo ./start.sh
 
 Open `http://<NAS-IP>:9000`
 
-**Updating:**
+---
+
+### Updating
+
 ```sh
 cd /volume1/tools/syn-tool
 sudo git pull
 sudo ./start.sh
 ```
-
----
-
-## Configuration
-
-All settings (share paths, exclusions, retention, billing, login credentials) are in the **Settings** tab of the web UI.

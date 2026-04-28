@@ -33,9 +33,14 @@ Sessions are permanent (30 days).
 
 `@app.before_request` blocks all `/api/*` routes (except `/api/auth/*`) with 401 if not authenticated.
 
+### Password storage
+Passwords stored as `pbkdf2:sha256:50000:<salt_hex>:<hash_hex>` using `hashlib.pbkdf2_hmac` (stdlib).
+Legacy plaintext passwords (default `"admin"`) auto-upgrade to a hash on first successful login.
+`GET /api/settings` and `POST /api/settings` response never include `auth_password`.
+
 ### Auth routes
 - `GET /api/auth/status` — `{ authenticated, auth_enabled }` — always public
-- `POST /api/auth/login` — body: `{ username, password }` → sets session
+- `POST /api/auth/login` — body: `{ username, password }` → verifies hash, auto-upgrades legacy plaintext, sets session
 - `POST /api/auth/logout` — clears session
 
 ## API Routes

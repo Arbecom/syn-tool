@@ -14,6 +14,7 @@ import datetime
 import io
 import threading
 import queue
+import hashlib
 from pathlib import Path
 from typing import Optional
 import secrets
@@ -79,6 +80,24 @@ def save_config(cfg: dict):
         json.dump(cfg, f, indent=2)
 
 
+_PBKDF2_ITERS = 50000
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), _PBKDF2_ITERS)
+    return f"pbkdf2:sha256:{_PBKDF2_ITERS}:{salt}:{h.hex()}"
+
+def verify_password(password: str, stored: str) -> bool:
+    if not stored.startswith('pbkdf2:'):
+        return password == stored  # legacy plaintext
+    try:
+        _, algo, iters, salt, expected = stored.split(':', 4)
+        h = hashlib.pbkdf2_hmac(algo, password.encode('utf-8'), salt.encode('utf-8'), int(iters))
+        return h.hex() == expected
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -112,8 +131,13 @@ def auth_login():
     if not cfg.get('auth_enabled', True):
         return jsonify({'ok': True})
     data = request.get_json() or {}
-    if (data.get('username') == cfg.get('auth_username', 'admin') and
-            data.get('password') == cfg.get('auth_password', 'admin')):
+    username = data.get('username', '')
+    password = data.get('password', '')
+    stored_pw = cfg.get('auth_password', 'admin')
+    if username == cfg.get('auth_username', 'admin') and verify_password(password, stored_pw):
+        if not stored_pw.startswith('pbkdf2:'):
+            cfg['auth_password'] = hash_password(password)
+            save_config(cfg)
         session.permanent = True
         session['authenticated'] = True
         return jsonify({'ok': True})
@@ -906,7 +930,9 @@ def api_mappings_restore(snap_id):
 
 @app.route("/api/settings", methods=["GET"])
 def api_settings_get():
-    return jsonify(load_config())
+    cfg = load_config()
+    cfg.pop('auth_password', None)
+    return jsonify(cfg)
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -937,12 +963,13 @@ def api_settings_post():
     if "auth_username" in body and str(body["auth_username"]).strip():
         cfg["auth_username"] = str(body["auth_username"]).strip()
     if "auth_password" in body and str(body["auth_password"]).strip():
-        cfg["auth_password"] = str(body["auth_password"]).strip()
+        cfg["auth_password"] = hash_password(str(body["auth_password"]).strip())
 
     save_config(cfg)
     _apply_retention(UPLOADS_DIR, "*.xlsx", cfg["upload_retention"])
     _apply_retention(UPLOADS_DIR, "*.xls",  cfg["upload_retention"])
     _apply_retention(EDITS_DIR,   "*.json", cfg["edit_retention"])
+    cfg.pop('auth_password', None)
     return jsonify({"success": True, "config": cfg})
 
 # ---------------------------------------------------------------------------
