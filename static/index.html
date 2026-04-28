@@ -283,7 +283,7 @@ tbody td { padding:8px 12px; vertical-align:middle; overflow:hidden; }
                 <span data-i18n="upload_excel"></span>
                 <input type="file" id="excel-file-input" accept=".xlsx,.xls" style="display:none" onchange="handleUpload(this)">
               </label>
-              <button class="btn-success" onclick="exportExcel()" data-i18n="export_excel"></button>
+              <button class="btn-success" id="export-btn" onclick="exportExcel()" data-i18n="export_excel"></button>
               <button class="btn-primary" id="save-btn" onclick="saveExcel()" disabled data-i18n="save"></button>
               <button class="btn-secondary" id="sync-btn" onclick="syncFromNAS()" disabled data-i18n="sync_from_nas"></button>
               <button class="btn-secondary btn-sm" onclick="addRow()" data-i18n="add_row"></button>
@@ -568,6 +568,7 @@ function reRenderCurrentTab() {
 const S = {
   shares: [], volumes: {}, scanStream: null, sharesUpdatedAt: null,
   shareSort: { col: 'size_bytes', dir: 'desc' },
+  pendingShares: new Set(),
   excel:  { headers: [], rows: [], _meta: {} },
   editBuffer: [],
   dirty: false,
@@ -740,36 +741,47 @@ async function loadShares() {
   es.onmessage = ev => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'busy') {
-      // Another scan is in progress — leave cached data, show notification
       S.scanStream = null; es.close();
       toast(t('scan_busy'), 'warning');
     } else if (msg.type === 'discovered') {
-      // All share names/paths known: build skeleton rows immediately
       S.shares = msg.shares.map(sh => ({
         ...sh, scanning: true, size_bytes: null, size_gb: null, size_human: null
       }));
       if (msg.volumes) S.volumes = msg.volumes;
       renderShares();
     } else if (msg.type === 'share') {
-      // One share finished: find its skeleton row and fill in real data
-      const idx = S.shares.findIndex(s => s.name === msg.share.name && s.base === msg.share.base);
-      if (idx >= 0) S.shares[idx] = {...msg.share, scanning: false};
-      else S.shares.push({...msg.share, scanning: false});
+      const idx = S.shares.findIndex(s => s.path === msg.share.path);
+      const entry = {...msg.share, scanning: false};
+      if (idx >= 0) S.shares[idx] = entry; else S.shares.push(entry);
+      if (msg.share.pending) S.pendingShares.add(msg.share.path);
       if (msg.warning) warnings.push(`${msg.share.name}: ${msg.warning}`);
+      _updateExcelPendingState();
+      renderShares();
+    } else if (msg.type === 'share_update') {
+      const idx = S.shares.findIndex(s => s.path === msg.share.path);
+      if (idx >= 0) S.shares[idx] = {...msg.share, scanning: false};
+      S.pendingShares.delete(msg.share.path);
+      if (msg.warning) warnings.push(`${msg.share.name}: ${msg.warning}`);
+      _updateExcelPendingState();
       renderShares();
     } else if (msg.type === 'error') {
       warnings.push(msg.message);
     } else if (msg.type === 'done') {
       S.volumes = msg.volumes || {};
-      S.scanStream = null; es.close();
       _onScanDone(warnings);
+    } else if (msg.type === 'all_done') {
+      S.pendingShares.clear();
+      _updateExcelPendingState();
+      S.scanStream = null; es.close();
+      renderShares();
     }
   };
 
   es.onerror = () => {
     if (S.scanStream) { S.scanStream.close(); S.scanStream = null; }
-    // Drop any shares still in skeleton state (their du never finished)
     S.shares = S.shares.filter(s => !s.scanning);
+    S.pendingShares.clear();
+    _updateExcelPendingState();
     if (!S.shares.length) {
       document.getElementById('shares-body').innerHTML =
         `<tr><td colspan="5" style="color:var(--danger);padding:16px">${t('scan_error')}Connection lost</td></tr>`;
@@ -784,6 +796,15 @@ function _onScanDone(warnings) {
   renderShares();
   warnings.forEach(w => toast(w, 'warning'));
   document.getElementById('sync-btn').disabled = !S.shares.length || !S.editBuffer.length;
+}
+
+function _updateExcelPendingState() {
+  const pending = S.pendingShares.size > 0;
+  const exportBtn = document.getElementById('export-btn');
+  const saveBtn   = document.getElementById('save-btn');
+  if (exportBtn) exportBtn.disabled = pending;
+  if (saveBtn && pending) saveBtn.disabled = true;
+  else if (saveBtn && !pending) saveBtn.disabled = !S.dirty;
 }
 
 function sortSharesBy(col) {
@@ -813,6 +834,8 @@ function renderShares() {
   if (updEl) {
     if (S.scanStream && S.shares.length > 0) {
       updEl.textContent = t('scanning', {done: completedShares.length, total: S.shares.length});
+    } else if (S.pendingShares.size > 0) {
+      updEl.textContent = `Calculating ${S.pendingShares.size} share${S.pendingShares.size > 1 ? 's' : ''}…`;
     } else {
       updEl.textContent = S.sharesUpdatedAt ? t('updated') + ': ' + fmtDate(S.sharesUpdatedAt) : '';
     }
@@ -873,7 +896,7 @@ function renderShares() {
     return `<tr title="${esc(subtitle)}">
       <td><strong>${esc(s.name)}</strong></td>
       <td class="cell-muted cell-mono">${esc(s.path)}</td>
-      <td><strong>${esc(s.size_human)}</strong></td>
+      <td><strong>${esc(s.size_human)}</strong>${s.pending ? ' <span class="spinner" style="width:10px;height:10px;border-width:2px;vertical-align:middle" title="Calculating exact size…"></span>' : ''}</td>
       <td class="cell-mono">${s.size_gb}</td>
       <td>
         <div class="bar-wrap">

@@ -35,9 +35,10 @@ DATA_DIR         = Path(os.environ.get("DATA_DIR", "./data"))
 UPLOADS_DIR      = DATA_DIR / "uploads"
 EDITS_DIR        = DATA_DIR / "edits"
 MAPPINGS_DIR     = DATA_DIR / "mappings_history"
-CURRENT_FILE     = DATA_DIR / "current.json"
-CONFIG_FILE      = DATA_DIR / "config.json"
-MAPPINGS_FILE    = DATA_DIR / "mappings.json"
+CURRENT_FILE          = DATA_DIR / "current.json"
+CONFIG_FILE           = DATA_DIR / "config.json"
+MAPPINGS_FILE         = DATA_DIR / "mappings.json"
+APPARENT_SIZES_FILE   = DATA_DIR / "apparent_sizes.json"
 
 _scan_lock = threading.Lock()   # Only one share scan may run at a time
 
@@ -78,6 +79,24 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
+
+
+def load_apparent_cache() -> dict:
+    if APPARENT_SIZES_FILE.exists():
+        try:
+            with open(APPARENT_SIZES_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_apparent_cache(cache: dict):
+    try:
+        with open(APPARENT_SIZES_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
 
 
 _PBKDF2_ITERS = 50000
@@ -238,20 +257,13 @@ def compute_mapping_diff(headers: list, rows: list, mappings: dict) -> dict:
 # NAS share scanning
 # ---------------------------------------------------------------------------
 
-def _btrfs_sizes_for_paths(paths: list, base: str) -> dict:
-    """Return {path: size_bytes} for a list of share paths under base.
-
-    Step 1 — parallel btrfs subvolume show per path (path-based ioctl, works in Docker
-              bind mounts where btrfs subvolume list misses entries).
-    Step 2 — one btrfs qgroup show for the whole volume.
-    Step 3 — match via level-1 qgroups first (1/<id>, aggregates nested subvolumes,
-              matches DSM), then level-0 (0/<id>).
-
-    Total subprocess calls: len(paths) parallel + 1, all fast metadata reads."""
+def _btrfs_sizes_for_paths(paths: list, base: str):
+    """Return (sizes, du_needed) where sizes is {path: size_bytes} and du_needed is
+    the set of paths where level-1 > level-0, meaning nested subvolumes cause btrfs
+    to undercount vs the apparent (File Station) size — those need du --apparent-size."""
     if not paths:
-        return {}
+        return {}, set()
 
-    # Step 1: resolve subvolume ID for every share path in parallel
     path_to_id: dict = {}
     id_lock = threading.Lock()
 
@@ -277,21 +289,18 @@ def _btrfs_sizes_for_paths(paths: list, base: str) -> dict:
         t.join()
 
     if not path_to_id:
-        return {}
+        return {}, set()
 
-    # Step 2: one qgroup show for the whole volume
     try:
-        # nsenter enters the host mount namespace (pid: host required in docker-compose)
-        # so btrfs can see the real btrfs quota tree, not the bind-mounted view
         rq = subprocess.run(
             ["nsenter", "--target", "1", "--mount", "--",
              "btrfs", "qgroup", "show", "--raw", base],
             capture_output=True, text=True, timeout=30
         )
         if rq.returncode != 0:
-            return {}
+            return {}, set()
     except Exception:
-        return {}
+        return {}, set()
 
     id_to_path = {sid: path for path, sid in path_to_id.items()}
     level0: dict = {}
@@ -308,20 +317,30 @@ def _btrfs_sizes_for_paths(paths: list, base: str) -> dict:
                 elif qlevel == '0':
                     level0[p] = rfer
 
-    # level-1 wins: shows total referenced data including nested subvolumes
-    # (larger numbers, more meaningful for billing — matches employer expectation)
-    return {**level0, **level1}
+    sizes = {**level0, **level1}
+    du_needed = {p for p in sizes if level1.get(p, 0) > level0.get(p, 0)}
+    return sizes, du_needed
 
 
-def _du_size(path: str):
-    """Return (size_bytes, warning_or_None) using du -sk. Last resort when btrfs unavailable."""
+def _du_size(path: str, apparent: bool = False):
+    """Return (size_bytes, warning_or_None). Use apparent=True to get logical file sizes
+    matching DSM File Station (needed for shares with btrfs snapshots/deduplication)."""
     try:
-        r = subprocess.run(
-            ["du", "-sk", path],
-            capture_output=True, text=True, timeout=300
-        )
-        if r.returncode == 0:
-            return int(r.stdout.split()[0]) * 1024, None
+        if apparent:
+            r = subprocess.run(
+                ["du", "--apparent-size", "--bytes", "-s", path],
+                capture_output=True, text=True, timeout=300
+            )
+            if r.returncode == 0:
+                return int(r.stdout.split()[0]), None
+            # BusyBox fallback
+            r = subprocess.run(["du", "-sb", path], capture_output=True, text=True, timeout=300)
+            if r.returncode == 0:
+                return int(r.stdout.split()[0]), None
+        else:
+            r = subprocess.run(["du", "-sk", path], capture_output=True, text=True, timeout=300)
+            if r.returncode == 0:
+                return int(r.stdout.split()[0]) * 1024, None
         warning = (r.stderr.strip() or "Could not read size").split("\n")[0]
         return 0, warning
     except subprocess.TimeoutExpired:
@@ -331,11 +350,9 @@ def _du_size(path: str):
 
 
 def dir_size_bytes(path: str) -> int:
-    """Return actual disk usage in bytes."""
     sb, _ = _du_size(path)
     if sb:
         return sb
-    # Final fallback: scandir walk
     total = 0
     try:
         with os.scandir(path) as it:
@@ -426,6 +443,9 @@ def api_shares_stream():
             return
 
         try:
+            apparent_cache = load_apparent_cache()
+            apparent_lock  = threading.Lock()
+
             shares_to_scan = []
             volumes = {}
 
@@ -460,7 +480,6 @@ def api_shares_stream():
 
             total = len(shares_to_scan)
 
-            # Tell the browser which shares exist before any sizing runs (skeleton rows)
             discovered = [{"name": n, "path": p, "base": b} for b, p, n in shares_to_scan]
             yield f'data: {json.dumps({"type":"discovered","shares":discovered,"volumes":volumes})}\n\n'
 
@@ -468,62 +487,105 @@ def api_shares_stream():
                 yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
                 return
 
-            # Pre-fetch btrfs sizes: parallel subvol show per share + one qgroup show per base
             btrfs_sizes: dict = {}
+            du_needed: set = set()
             for base in set(b for b, p, n in shares_to_scan):
                 paths = [p for b2, p, n in shares_to_scan if b2 == base]
-                btrfs_sizes.update(_btrfs_sizes_for_paths(paths, base))
+                sz, dn = _btrfs_sizes_for_paths(paths, base)
+                btrfs_sizes.update(sz)
+                du_needed.update(dn)
 
-            result_q: queue.Queue = queue.Queue()
-            lock = threading.Lock()
-            completed = [0]
-            sem = threading.Semaphore(4)   # only used when falling back to du -sk
-
-            def scan_one(base, path, name):
-                if path in btrfs_sizes:
-                    sb, warning = btrfs_sizes[path], None
-                else:
-                    with sem:
-                        sb, warning = _du_size(path)
-                share = {
-                    "name": name, "path": path, "base": base,
-                    "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),
-                }
-                with lock:
-                    completed[0] += 1
-                    done = completed[0]
-                msg: dict = {"type": "share", "share": share, "done": done, "total": total}
-                if warning:
-                    msg["warning"] = warning
-                result_q.put(msg)
+            # ── Phase 1: emit every share immediately ──────────────────────────
+            # Regular shares: btrfs result is final.
+            # Backup shares (du_needed): show cached apparent size (or btrfs estimate)
+            # with pending=true so the UI can show a calculating indicator.
+            all_shares_collected: list = []
+            pending_shares: list = []   # (base, path, name) tuples needing du
 
             for base, path, name in shares_to_scan:
-                threading.Thread(target=scan_one, args=(base, path, name), daemon=True).start()
+                if path in btrfs_sizes and path not in du_needed:
+                    sb = btrfs_sizes[path]
+                    share = {
+                        "name": name, "path": path, "base": base,
+                        "size_bytes": sb, "size_gb": bytes_to_gb(sb),
+                        "size_human": human_size(sb), "pending": False,
+                    }
+                    all_shares_collected.append(share)
+                    yield f'data: {json.dumps({"type":"share","share":share})}\n\n'
+                else:
+                    # Show best available size immediately
+                    sb = apparent_cache.get(path, btrfs_sizes.get(path, 0))
+                    share = {
+                        "name": name, "path": path, "base": base,
+                        "size_bytes": sb, "size_gb": bytes_to_gb(sb),
+                        "size_human": human_size(sb), "pending": True,
+                    }
+                    all_shares_collected.append(share)
+                    pending_shares.append((base, path, name))
+                    yield f'data: {json.dumps({"type":"share","share":share})}\n\n'
+
+            # Write cache with phase-1 data (pending shares have estimated sizes)
+            try:
+                with open(DATA_DIR / "shares_cache.json", "w") as f:
+                    json.dump({"shares": all_shares_collected, "volumes": volumes,
+                               "scanned_at": datetime.datetime.now().isoformat(),
+                               "partial": bool(pending_shares)}, f, default=str)
+            except Exception:
+                pass
+
+            yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
+
+            if not pending_shares:
+                yield f'data: {json.dumps({"type":"all_done"})}\n\n'
+                return
+
+            # ── Phase 2: du --apparent-size for backup/pending shares ──────────
+            du_q: queue.Queue = queue.Queue()
+            sem = threading.Semaphore(4)
+
+            def du_scan(base, path, name):
+                with sem:
+                    sb, warning = _du_size(path, apparent=(path in du_needed))
+                with apparent_lock:
+                    cached_val = apparent_cache.get(path, 0)
+                    sb = max(sb, cached_val)          # accumulate: never shrink
+                    apparent_cache[path] = sb
+                    save_apparent_cache(apparent_cache)
+                share = {
+                    "name": name, "path": path, "base": base,
+                    "size_bytes": sb, "size_gb": bytes_to_gb(sb),
+                    "size_human": human_size(sb), "pending": False,
+                }
+                msg: dict = {"type": "share_update", "share": share}
+                if warning:
+                    msg["warning"] = warning
+                du_q.put(msg)
+
+            for base, path, name in pending_shares:
+                threading.Thread(target=du_scan, args=(base, path, name), daemon=True).start()
 
             received = 0
-            all_shares_collected: list = []
-            while received < total:
+            while received < len(pending_shares):
                 try:
-                    msg = result_q.get(timeout=0.5)
+                    msg = du_q.get(timeout=0.5)
                     received += 1
-                    all_shares_collected.append(msg["share"])
-                    # Write partial cache so any refresh during scan sees progress
+                    # Update in-memory collection and rewrite cache
+                    for i, s in enumerate(all_shares_collected):
+                        if s["path"] == msg["share"]["path"]:
+                            all_shares_collected[i] = msg["share"]
+                            break
                     try:
-                        cache = {
-                            "shares":     all_shares_collected,
-                            "volumes":    volumes,
-                            "scanned_at": datetime.datetime.now().isoformat(),
-                            "partial":    received < total,
-                        }
                         with open(DATA_DIR / "shares_cache.json", "w") as f:
-                            json.dump(cache, f, default=str)
+                            json.dump({"shares": all_shares_collected, "volumes": volumes,
+                                       "scanned_at": datetime.datetime.now().isoformat(),
+                                       "partial": received < len(pending_shares)}, f, default=str)
                     except Exception:
                         pass
                     yield f'data: {json.dumps(msg)}\n\n'
                 except queue.Empty:
                     yield ': keepalive\n\n'
 
-            yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
+            yield f'data: {json.dumps({"type":"all_done"})}\n\n'
 
         finally:
             _scan_lock.release()
@@ -1018,21 +1080,34 @@ def _scan_and_cache_locked():
         except OSError:
             pass
 
+    apparent_cache = load_apparent_cache()
+    apparent_lock  = threading.Lock()
+
     btrfs_sizes: dict = {}
+    du_needed: set = set()
     for base in set(b for b, p, n in shares_to_scan):
         paths = [p for b2, p, n in shares_to_scan if b2 == base]
-        btrfs_sizes.update(_btrfs_sizes_for_paths(paths, base))
+        sz, dn = _btrfs_sizes_for_paths(paths, base)
+        btrfs_sizes.update(sz)
+        du_needed.update(dn)
 
     all_shares: list = []
     lock = threading.Lock()
     sem = threading.Semaphore(4)
 
     def scan_one(base, path, name):
-        if path in btrfs_sizes:
+        if path in btrfs_sizes and path not in du_needed:
             sb = btrfs_sizes[path]
         else:
             with sem:
-                sb, _ = _du_size(path)
+                sb, _ = _du_size(path, apparent=(path in du_needed))
+            with apparent_lock:
+                cached_val = apparent_cache.get(path, 0)
+                sb = max(sb, cached_val)
+                apparent_cache[path] = sb
+                save_apparent_cache(apparent_cache)
+            if not sb and path in btrfs_sizes:
+                sb = btrfs_sizes[path]
         share = {
             "name": name, "path": path, "base": base,
             "size_bytes": sb, "size_gb": bytes_to_gb(sb), "size_human": human_size(sb),

@@ -13,12 +13,9 @@ The NAS pulls the pre-built image — no building on the NAS (Synology kernel do
 
 ### docker-compose.yml key settings
 - `image: ghcr.io/applejuicelolmc/syn-tool:latest`
-- `privileged: true` — required for btrfs ioctl calls
-- `pid: host` — required for `nsenter` to enter the host mount namespace (needed for `btrfs qgroup show` to work inside Docker)
 - `/volume1:/volume1:ro` — NAS shares mounted read-only
 
-### Why nsenter + pid: host
-Inside Docker, `btrfs qgroup show /volume1` returns "quotas not enabled" because Docker's bind mount doesn't expose the btrfs quota tree. `nsenter --target 1 --mount` enters the host's mount namespace (PID 1 = host init via `pid: host`) where quotas ARE enabled, then runs `btrfs qgroup show` there.
+Share sizes use `du --apparent-size` (logical file sizes, matches DSM File Station). No btrfs commands, no `privileged` or `pid: host` needed.
 
 ### Container Manager update flow
 1. Stop project

@@ -89,15 +89,21 @@ GET returns full config. POST accepted fields: `share_paths`, `exclude_shares`, 
 ## Share size measurement
 
 ### `_btrfs_sizes_for_paths(paths, base)`
+Returns `(sizes, du_needed)` tuple.
 1. Runs `btrfs subvolume show PATH` in parallel for each share → gets subvolume IDs
 2. Runs `nsenter --target 1 --mount -- btrfs qgroup show --raw base` (enters host mount namespace so quota data is accessible from Docker)
-3. Parses qgroup output: level-0 = per-subvolume, level-1 = aggregate including nested subvolumes
-4. Returns `{**level0, **level1}` — level-1 wins (larger, includes all nested subvolume data; more useful for billing)
-5. Falls back to `_du_size` for any path not found via btrfs
+3. Parses level-0 (per-subvolume) and level-1 (aggregate including nested) qgroup entries
+4. `du_needed` = paths where `level-1 > level-0` — these have nested subvolumes causing btrfs to undercount vs File Station apparent size (e.g. GsuiteBackup, ActiveBackupforBusiness)
 
 **Why nsenter:** Docker bind-mounted `/volume1` sees "quotas not enabled" from `btrfs qgroup show`. nsenter enters the host's mount namespace (PID 1 via `pid: host`) where quotas ARE enabled.
 
-**Why level-1 wins:** level-1 qgroup aggregates ALL nested subvolumes (e.g. Office365BackUp, GsuiteBackup store data in nested subvolumes). Level-1 gives total referenced data — more meaningful for billing than physical dedup-aware size.
+### `_du_size(path, apparent=False)`
+`apparent=True` uses `du --apparent-size --bytes -s` (logical file sizes = File Station). Used automatically for shares in `du_needed`. Falls back to `du -sb` for BusyBox. `apparent=False` uses `du -sk` (physical blocks, fallback for non-btrfs shares).
+
+### Scan logic
+- Shares **not** in `du_needed`: instant btrfs qgroup result
+- Shares in `du_needed` (backup shares with snapshots): `du --apparent-size` run via semaphore — slower but matches File Station
+- Shares not found by btrfs at all: `du -sk` fallback
 
 ## Key functions
 
