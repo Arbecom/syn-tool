@@ -103,6 +103,10 @@ tbody td { padding:8px 12px; vertical-align:middle; overflow:hidden; }
 .scan-progress-bar { height:3px; background:var(--border); display:none; }
 .scan-progress-bar.active { display:block; }
 .scan-progress-fill { height:100%; background:var(--primary); transition:width .5s ease; min-width:4px; border-radius:0 3px 3px 0; }
+/* Indeterminate state: animated stripe before share count is known */
+@keyframes progress-indeterminate { 0%{left:-40%;width:40%} 60%{left:60%;width:40%} 100%{left:100%;width:0} }
+.scan-progress-bar.active.indeterminate { overflow:hidden; position:relative; }
+.scan-progress-bar.active.indeterminate .scan-progress-fill { position:absolute; animation:progress-indeterminate 1.4s ease-in-out infinite; width:40%; }
 
 /* Scanning status text */
 #shares-updated.is-scanning { color:var(--primary); font-weight:600; font-size:13px; }

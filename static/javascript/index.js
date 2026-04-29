@@ -274,6 +274,14 @@ async function loadShares() {
       `<tr><td colspan="5" class="empty-state">${translate('loading')}</td></tr>`;
   }
 
+  // Show scanning indicator immediately — before any SSE events arrive.
+  // Btrfs returns sizes almost instantly so events may fire before the browser
+  // paints; setting this here guarantees the user sees feedback right away.
+  const progressBarEl = document.getElementById('scan-progress-bar');
+  const scanStatusEl  = document.getElementById('shares-updated');
+  if (progressBarEl) { progressBarEl.classList.add('active', 'indeterminate'); }
+  if (scanStatusEl)  { scanStatusEl.classList.add('is-scanning'); scanStatusEl.textContent = translate('loading'); }
+
   const warnings = [];
   const eventSource = new EventSource('/api/shares/stream');
   state.activeScanStream = eventSource;
@@ -288,6 +296,8 @@ async function loadShares() {
         ...share, scanning: true, size_bytes: null, size_gb: null, size_human: null
       }));
       if (msg.volumes) state.volumes = msg.volumes;
+      // Switch progress bar from indeterminate to determinate now that share count is known
+      if (progressBarEl) progressBarEl.classList.remove('indeterminate');
       renderShares();
     } else if (msg.type === 'share') {
       const idx = state.shares.findIndex(share => share.path === msg.share.path);
