@@ -470,7 +470,7 @@ def api_shares_stream():
                         apparent_cache[path] = sb
                         save_apparent_cache(apparent_cache)
                     else:
-                        sb = apparent_cache.get(path, 0)
+                        sb = apparent_cache.get(path, btrfs_sizes.get(path, 0))
                 share = {
                     "name": name, "path": path, "base": base,
                     "size_bytes": sb, "size_gb": bytes_to_gb(sb),
