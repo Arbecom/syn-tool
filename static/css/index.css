@@ -99,6 +99,19 @@ tbody td { padding:8px 12px; vertical-align:middle; overflow:hidden; }
 .bar-bg { height:6px; background:#e2e8f0; border-radius:3px; overflow:hidden; }
 .bar-fill { height:100%; border-radius:3px; transition:width .3s; }
 
+/* Scan progress bar (between card header and table) */
+.scan-progress-bar { height:3px; background:var(--border); display:none; }
+.scan-progress-bar.active { display:block; }
+.scan-progress-fill { height:100%; background:var(--primary); transition:width .5s ease; min-width:4px; border-radius:0 3px 3px 0; }
+
+/* Scanning status text */
+#shares-updated.is-scanning { color:var(--primary); font-weight:600; font-size:13px; }
+
+/* Scanning rows — shimmer effect to signal active measurement */
+@keyframes row-shimmer { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
+tbody tr.row-scanning { background:linear-gradient(90deg,transparent,rgba(59,130,246,.07),transparent); background-size:200% 100%; animation:row-shimmer 2s linear infinite; }
+tbody tr.row-scanning:hover { background:linear-gradient(90deg,transparent,rgba(59,130,246,.12),transparent); background-size:200% 100%; }
+
 /* ===================== BUTTONS ===================== */
 .btn-primary { background:var(--primary); color:#fff; }
 .btn-primary:hover { background:var(--primary-h); }

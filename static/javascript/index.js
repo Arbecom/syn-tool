@@ -371,9 +371,20 @@ function renderShares() {
   const sortedScanning = [...scanningShares].sort((a, b) => a.name.localeCompare(b.name));
   const allShares = [...sortedCompleted, ...sortedScanning];
 
+  const isActivelyScanning = !!state.activeScanStream;
+  const progressBar  = document.getElementById('scan-progress-bar');
+  const progressFill = document.getElementById('scan-progress-fill');
+  if (progressBar) {
+    progressBar.classList.toggle('active', isActivelyScanning);
+    if (progressFill && isActivelyScanning && state.shares.length > 0) {
+      progressFill.style.width = Math.round(completedShares.length / state.shares.length * 100) + '%';
+    }
+  }
+
   const updatedEl = document.getElementById('shares-updated');
   if (updatedEl) {
-    if (state.activeScanStream && state.shares.length > 0) {
+    updatedEl.classList.toggle('is-scanning', isActivelyScanning);
+    if (isActivelyScanning && state.shares.length > 0) {
       updatedEl.textContent = translate('scanning', {done: completedShares.length, total: state.shares.length});
     } else if (state.pendingSharePaths.size > 0) {
       updatedEl.textContent = `Calculating ${state.pendingSharePaths.size} share${state.pendingSharePaths.size > 1 ? 's' : ''}…`;
@@ -412,7 +423,7 @@ function renderShares() {
 
   document.getElementById('shares-body').innerHTML = allShares.map(share => {
     if (share.scanning) {
-      return `<tr>
+      return `<tr class="row-scanning">
         <td><strong>${escapeHtml(share.name)}</strong></td>
         <td class="cell-muted cell-mono">${escapeHtml(share.path)}</td>
         <td><div style="display:flex;align-items:center;gap:6px"><div class="spinner"></div></div></td>
