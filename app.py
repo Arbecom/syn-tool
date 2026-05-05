@@ -1357,10 +1357,23 @@ def api_dsm_setup_monthly_reports():
                 ts_errors.append(f'TaskScheduler v{ts_ver}: {ex}')
 
         if not schedule_set:
-            all_errs = cfg_errors + ts_errors
+            def _explain(msgs):
+                explained = []
+                for msg in msgs:
+                    if 'code 120' in msg:
+                        explained.append(msg + ' (onvoldoende rechten)')
+                    elif 'code 4800' in msg:
+                        explained.append(msg + ' (scriptuitvoering mogelijk uitgeschakeld in DSM > Configuratiescherm > Terminal & SNMP)')
+                    else:
+                        explained.append(msg)
+                return explained
+            out['schedule_cmd']  = cmd
+            out['schedule_day']  = sched_day
+            out['schedule_hour'] = sched_hour
+            out['schedule_min']  = sched_minute
             out['errors'].append(
-                'Schema instellen mislukt. Probeer het handmatig in DSM > Taakplanner in te stellen '
-                f'(commando: {cmd}). DSM foutmeldingen: {" | ".join(all_errs)}'
+                'Automatisch instellen niet mogelijk. '
+                + ' | '.join(_explain(cfg_errors + ts_errors))
             )
 
     out['schedule_set']     = schedule_set

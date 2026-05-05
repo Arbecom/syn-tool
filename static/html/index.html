@@ -237,6 +237,30 @@
   </article>
 </dialog>
 
+<!-- SCHEDULE MANUAL MODAL -->
+<dialog id="schedule-modal">
+  <article class="modal-box" style="max-width:560px">
+    <h3>Taakplanner handmatig instellen</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:14px" id="sched-modal-err"></p>
+    <ol style="font-size:13px;line-height:1.9;padding-left:18px;margin:0 0 14px">
+      <li>Open <strong>DSM &gt; Configuratiescherm &gt; Taakplanner</strong></li>
+      <li>Klik <strong>Maken &gt; Geplande taak &gt; Gebruikersscript</strong></li>
+      <li>Tab <em>Algemeen</em>: naam <strong>Storage Analyzer Maandelijks</strong>, gebruiker <strong>root</strong>, vink <em>Ingeschakeld</em> aan</li>
+      <li>Tab <em>Planning</em>: stel in op <strong>Maandelijks</strong>, dag <strong id="sched-modal-day"></strong>, tijd <strong id="sched-modal-time"></strong></li>
+      <li>Tab <em>Taakinstellingen</em>: plak dit script in het invoerveld:<br>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+          <code id="sched-modal-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:12px;flex:1;word-break:break-all"></code>
+          <button class="btn-secondary" style="white-space:nowrap;font-size:12px" onclick="copySchedCmd()">Kopieer</button>
+        </div>
+      </li>
+      <li>Klik <strong>OK</strong> en bevestig eventuele waarschuwing</li>
+    </ol>
+    <footer class="modal-actions">
+      <button class="btn-primary" onclick="closeSchedModal()">Sluiten</button>
+    </footer>
+  </article>
+</dialog>
+
 <!-- MAPPING DIFF MODAL -->
 <dialog id="mapping-modal">
   <article class="diff-modal-box">

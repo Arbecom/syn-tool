@@ -1096,6 +1096,28 @@ async function testDsmConnection() {
   }
 }
 
+function showScheduleManualModal(cmd, day, hour, minute, errDetail) {
+  const pad = n => String(n).padStart(2, '0');
+  document.getElementById('sched-modal-cmd').textContent  = cmd;
+  document.getElementById('sched-modal-day').textContent  = day;
+  document.getElementById('sched-modal-time').textContent = `${pad(hour)}:${pad(minute)}`;
+  const errEl = document.getElementById('sched-modal-err');
+  if (errDetail) {
+    errEl.textContent = `Automatisch instellen mislukt: ${errDetail}`;
+    errEl.style.display = '';
+  } else {
+    errEl.style.display = 'none';
+  }
+  document.getElementById('schedule-modal').showModal();
+}
+
+function closeSchedModal() { document.getElementById('schedule-modal').close(); }
+
+function copySchedCmd() {
+  const cmd = document.getElementById('sched-modal-cmd').textContent;
+  navigator.clipboard.writeText(cmd).then(() => toast('Gekopieerd naar klembord', 'success'));
+}
+
 async function setupMonthlyReports() {
   const btn    = document.getElementById('dsm-setup-btn');
   const result = document.getElementById('dsm-setup-result');
@@ -1117,35 +1139,33 @@ async function setupMonthlyReports() {
 
     const pad = n => String(n).padStart(2, '0');
     const timeStr = `dag ${day}, ${pad(hour)}:${pad(minute)}`;
-    const lines = [];
+    const toastLines = [];
 
-    if (data.existing_reports.length)
-      lines.push(`${data.existing_reports.length} bestaande rapport(en) gevonden`);
     if (data.created.length)
-      lines.push(`Nieuw aangemaakt: ${data.created.join(', ')}`);
+      toastLines.push(`✓ Rapport aangemaakt: ${data.created.join(', ')}`);
     if (data.failed.length)
-      lines.push(`Aanmaken mislukt: ${data.failed.map(f => `${f.share || '?'} (code ${f.code || '?'})`).join(', ')}`);
+      toastLines.push(`✗ Aanmaken mislukt: ${data.failed.map(f => `${f.share || '?'} (code ${f.code || '?'})`).join(', ')}`);
 
-    let schedLine = '';
     if (data.schedule_type === 'monthly')
-      schedLine = `✓ Maandelijks schema ingesteld (${timeStr})`;
+      toastLines.push(`✓ Maandelijks schema ingesteld (${timeStr})`);
     else if (data.schedule_type === 'weekly_monday')
-      schedLine = `⚠ Wekelijks schema ingesteld (maandag ${pad(hour)}:${pad(minute)}) — DSM ondersteunt geen maandelijks schema via API`;
+      toastLines.push(`⚠ Wekelijks schema ingesteld (maandag ${pad(hour)}:${pad(minute)}) — DSM ondersteunt geen maandelijks schema via API`);
     else if (data.schedule_type === 'task_scheduler_monthly')
-      schedLine = `✓ Taakplanner-taak aangemaakt (maandelijks, ${timeStr})`;
-    else
-      schedLine = `✗ Schema instellen mislukt — voeg handmatig een taak toe in DSM > Taakplanner`;
+      toastLines.push(`✓ Taakplanner-taak aangemaakt (maandelijks, ${timeStr})`);
 
-    lines.push(schedLine);
-
-    if (data.errors && data.errors.length)
-      data.errors.forEach(e => lines.push(e));
-
-    const toastType = data.schedule_set ? (data.schedule_type === 'weekly_monday' ? 'warning' : 'success') : 'error';
-    toast(lines.join('\n'), toastType);
-
-    result.style.color = data.schedule_set ? 'var(--success, green)' : 'var(--error, red)';
-    result.textContent = data.schedule_set ? '✓ Klaar' : '✗ Mislukt';
+    if (!data.schedule_set) {
+      // Show a detailed manual-setup modal instead of a tiny toast
+      const cmd  = data.schedule_cmd || '/usr/syno/bin/syno_volume_analyze -w eval-timetable';
+      const errDetail = (data.errors || []).join('\n');
+      showScheduleManualModal(cmd, day, hour, minute, errDetail);
+      result.style.color = 'var(--error, red)';
+      result.textContent = '✗ Handmatig instellen vereist — zie instructies';
+    } else {
+      const toastType = data.schedule_type === 'weekly_monday' ? 'warning' : 'success';
+      if (toastLines.length) toast(toastLines.join('\n'), toastType);
+      result.style.color = 'var(--success, green)';
+      result.textContent = '✓ Klaar';
+    }
   } catch(err) {
     toast(`Maandelijkse rapporten: ${err.message}`, 'error');
     result.style.color = 'var(--error, red)';
@@ -1171,6 +1191,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (event.target === document.getElementById('mapping-modal')) closeMappingModal();
   });
   document.getElementById('mapping-modal').addEventListener('cancel', () => closeMappingModal());
+  document.getElementById('schedule-modal').addEventListener('click', event => {
+    if (event.target === document.getElementById('schedule-modal')) closeSchedModal();
+  });
+  document.getElementById('schedule-modal').addEventListener('cancel', () => closeSchedModal());
   window.addEventListener('beforeunload', event => {
     if (state.isDirty) { event.preventDefault(); }
   });
