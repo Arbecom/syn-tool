@@ -112,8 +112,22 @@ Three sub-tabs: Uploads / Edits / Links (mappings).
 ## Settings tab
 `loadSettings()` / `renderSettings()` / `saveSettings()`.
 
+### Unified shares table (`id="unified-shares-table"`)
+Replaces the old "Exclude Shares" text-input list. Populated in `renderSettings()` from `state.shares` (sorted A–Z). Shows "scan first" message if no shares loaded.
+
+Each row:
+- Share name + analyzer badge: `📊 YYYY-MM-DD` (green, `var(--success)`) if `analyzer_date` set, else `Geen rapport` (muted)
+- **Scan** checkbox (`.share-scan-cb`, `data-share="name"`): unchecked = add to `exclude_shares` on save. Default: checked unless share is currently in `exclude_shares`.
+- **Rapport** checkbox (`.sched-share-cb`, `value="name"`): used by `setupMonthlyReports()`. Default: all checked.
+
+Checkbox states survive re-renders (saved to `prevScan`/`prevRapport` maps before innerHTML overwrite).
+
+`schedSelectAll(bool)` toggles all `.sched-share-cb` checkboxes (Rapport column only).
+
+`saveSettings()` derives `exclude_shares` from: @/# patterns preserved + named exclusions not in table + unchecked Scan rows. Falls back to `state.settings.exclude_shares` if table not rendered.
+
 Fields:
-- share_paths (list), exclude_shares (list), mailbox_gb (number)
+- share_paths (list), mailbox_gb (number)
 - upload/edit retention (select 5/10/20/50)
 - Auth: `auth-username` text input + `auth-password` password input (blank = keep existing)
 - DSM section: `dsm-host`, `dsm-port`, `dsm-user`, `dsm-password` (password input)
@@ -136,7 +150,7 @@ Fields:
   - `task_scheduler_monthly`: `✓ Task Scheduler taak aangemaakt (maandelijks, dag 1, 03:00)`
   - no schedule: `✗ Schema instellen mislukt — stel handmatig in via DSM`
 
-Share picker: `id="sched-shares-list"` — populated in `renderSettings()` from `state.shares` (sorted alphabetically, all checked by default). Shows "Scan het dashboard eerst" if `state.shares` is empty. `schedSelectAll(bool)` toggles all checkboxes.
+Share selection: uses `.sched-share-cb` checkboxes from the unified shares table above (Rapport column). `schedSelectAll(bool)` toggles all.
 Schedule picker: `id="sched-day"` / `id="sched-hour"` / `id="sched-minute"` — number inputs, defaults 1 / 3 / 0.
 
 ## Auth / Login

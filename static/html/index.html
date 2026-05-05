@@ -143,12 +143,9 @@
             </p>
           </section>
           <section class="settings-section">
-            <h3 data-i18n="exclude_shares"></h3>
-            <ul id="exclude-list"></ul>
-            <p style="display:flex;gap:8px;margin-top:8px">
-              <input id="new-exclude" placeholder="@eaDir">
-              <button class="btn-secondary" onclick="addExclude()" data-i18n="add"></button>
-            </p>
+            <h3>Shares</h3>
+            <p style="color:var(--muted);font-size:12px;margin-bottom:10px">Scan: opnemen in de dashboardscan. Rapport: maandelijks Storage Analyzer rapport instellen.</p>
+            <div id="unified-shares-table"></div>
           </section>
           <section class="settings-section">
             <h3 data-i18n="billing_formula"></h3>
@@ -210,15 +207,6 @@
               <label class="form-label"></label>
               <button class="btn-secondary" onclick="testDsmConnection()" id="dsm-test-btn">Verbinding testen</button>
               <span id="dsm-test-result" style="font-size:12px;margin-left:8px"></span>
-            </p>
-            <p class="form-row">
-              <label class="form-label">Shares</label>
-              <span>
-                <div id="sched-shares-list" style="max-height:130px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:5px 8px;background:var(--bg);font-size:13px;min-width:200px"></div>
-                <div style="margin-top:4px;font-size:12px;color:var(--muted)">
-                  <a href="#" onclick="schedSelectAll(true);return false" style="color:var(--primary)">Alles</a> &middot; <a href="#" onclick="schedSelectAll(false);return false" style="color:var(--primary)">Geen</a>
-                </div>
-              </span>
             </p>
             <p class="form-row">
               <label class="form-label">Tijdstip</label>

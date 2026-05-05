@@ -1272,58 +1272,76 @@ def api_dsm_setup_monthly_reports():
         except Exception as ex:
             out['failed'].append({'share': share, 'error': str(ex)})
 
-    # Set schedule — try monthly first, then weekly as fallback
+    # Set schedule via Storage Analyzer config — only include report_location when set.
+    # Monthly is not natively supported; weekly is the best this API offers.
     schedule_set = False
     h, m, d = str(sched_hour), str(sched_minute), str(sched_day)
-    for attempt, label in [
-        ({'schedule_type': 'monthly', 'month_day': d, 'hour': h, 'minute': m,
-          'report_location': report_location}, 'monthly'),
-        ({'month_day': d, 'hour': h, 'minute': m,
-          'report_location': report_location}, 'monthly'),
-        ({'week_day': '1', 'hour': h, 'minute': m,
-          'report_location': report_location}, 'weekly_monday'),
+    base_params = {'hour': h, 'minute': m}
+    if report_location:
+        base_params['report_location'] = report_location
+    for extra, label in [
+        ({'schedule_type': 'monthly', 'month_day': d}, 'monthly'),
+        ({'month_day': d}, 'monthly'),
+        ({'week_day': '1'}, 'weekly_monday'),
     ]:
         if schedule_set:
             break
         try:
-            r = dsm_post(dict(api='SYNO.Core.Report.Config', version='1', method='set', **attempt))
+            r = dsm_post(dict(api='SYNO.Core.Report.Config', version='1', method='set',
+                              **base_params, **extra))
             if r.get('success'):
                 schedule_set = True
                 out['schedule_type'] = label
         except Exception:
             pass
 
-    # Fallback: create a DSM Task Scheduler script task for monthly execution.
-    # 'task' must be a JSON object (not flat params) — flat params cause error 4800.
+    # Fallback: DSM Task Scheduler script task.
+    # Delete any pre-existing task with the same name first (avoids 4800 name-conflict).
+    # Try API versions 1 then 4 — version requirement varies by DSM release.
     if not schedule_set:
         cmd = '/usr/syno/bin/syno_volume_analyze -w eval-timetable'
+        task_name = 'Storage Analyzer Maandelijks'
+
+        # Delete existing task with this name if present
         try:
-            schedule_json = json.dumps({
-                'date': str(sched_day), 'date_type': 0,
-                'hour': sched_hour, 'minute': sched_minute,
-                'repeat_min': 0, 'repeat_min_store_config': 30,
-                'week_day': '0,1,2,3,4,5,6',
-            })
-            task_json = json.dumps({
-                'owner': 'root', 'script': cmd, 'type': 'script',
-                'notify_enable': False, 'notify_mail': '', 'notify_if_error': False,
-            })
-            r = dsm_post({
-                'api': 'SYNO.Core.TaskScheduler', 'version': '4', 'method': 'create',
-                'name': 'Storage Analyzer Maandelijks',
-                'owner': 'root', 'enable': 'true',
-                'schedule': schedule_json,
-                'task': task_json,
-            })
-            if r.get('success'):
-                schedule_set = True
-                out['schedule_type'] = 'task_scheduler_monthly'
-                out['task_created']  = True
-            else:
-                code = r.get('error', {}).get('code', '?')
-                out['errors'].append(f'Task Scheduler aanmaken mislukt (code {code}) — stel handmatig in via DSM')
-        except Exception as ex:
-            out['errors'].append(f'Task Scheduler fout: {ex}')
+            r = dsm_post({'api': 'SYNO.Core.TaskScheduler', 'version': '1', 'method': 'list'})
+            tasks = r.get('data', {}).get('tasks', []) if r.get('success') else []
+            for t in tasks:
+                if t.get('name') == task_name and t.get('can_delete'):
+                    dsm_post({'api': 'SYNO.Core.TaskScheduler', 'version': '1',
+                              'method': 'delete', 'id': str(t['id'])})
+        except Exception:
+            pass
+
+        schedule_json = json.dumps({
+            'date': str(sched_day), 'date_type': 0,
+            'hour': sched_hour, 'minute': sched_minute,
+            'repeat_min': 0, 'repeat_min_store_config': 30,
+            'week_day': '0,1,2,3,4,5,6',
+        })
+        last_error = ''
+        for ts_ver in ['1', '4']:
+            if schedule_set:
+                break
+            task_json = json.dumps({'owner': 'root', 'script': cmd})
+            try:
+                r = dsm_post({
+                    'api': 'SYNO.Core.TaskScheduler', 'version': ts_ver, 'method': 'create',
+                    'name': task_name, 'owner': 'root', 'enable': 'true',
+                    'schedule': schedule_json, 'task': task_json,
+                })
+                if r.get('success'):
+                    schedule_set = True
+                    out['schedule_type'] = 'task_scheduler_monthly'
+                    out['task_created']  = True
+                else:
+                    code = r.get('error', {}).get('code', '?')
+                    last_error = f'code {code} (v{ts_ver})'
+            except Exception as ex:
+                last_error = str(ex)
+
+        if not schedule_set:
+            out['errors'].append(f'Task Scheduler aanmaken mislukt ({last_error}) — stel handmatig in via DSM')
 
     out['schedule_set']     = schedule_set
     out['covered_shares']   = sorted(covered)

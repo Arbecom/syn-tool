@@ -953,10 +953,6 @@ function renderSettings() {
     (config.share_paths || []).map((path, index) =>
       `<li class="list-item"><span>${escapeHtml(path)}</span><button class="btn-danger btn-sm" onclick="removeSharePath(${index})">✕</button></li>`
     ).join('');
-  document.getElementById('exclude-list').innerHTML =
-    (config.exclude_shares || []).map((pattern, index) =>
-      `<li class="list-item"><span>${escapeHtml(pattern)}</span><button class="btn-danger btn-sm" onclick="removeExclude(${index})">✕</button></li>`
-    ).join('');
   ['upload','edit'].forEach(retentionType => {
     const selectElement = document.getElementById(`${retentionType}-retention`);
     const storedValue   = String(config[`${retentionType}_retention`] || 10);
@@ -977,14 +973,42 @@ function renderSettings() {
   const pwSet = document.getElementById('dsm-password-set');
   if (pwSet) pwSet.style.display = config.dsm_password_set ? 'inline' : 'none';
 
-  const schedList = document.getElementById('sched-shares-list');
-  if (state.shares.length) {
-    const sorted = state.shares.slice().sort((a, b) => a.name.localeCompare(b.name));
-    schedList.innerHTML = sorted.map(s =>
-      `<label style="display:block;padding:2px 0;cursor:pointer"><input type="checkbox" class="sched-share-cb" value="${escapeHtml(s.name)}" checked> ${escapeHtml(s.name)}</label>`
-    ).join('');
+  // Save current checkbox states so re-renders (e.g. add share path) don't reset selections
+  const prevScan = {}, prevRapport = {};
+  document.querySelectorAll('.share-scan-cb').forEach(cb => { prevScan[cb.dataset.share] = cb.checked; });
+  document.querySelectorAll('.sched-share-cb').forEach(cb => { prevRapport[cb.value] = cb.checked; });
+
+  const tableEl = document.getElementById('unified-shares-table');
+  const excludeSet = new Set(config.exclude_shares || []);
+  if (!state.shares.length) {
+    tableEl.innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0">Scan het dashboard eerst om shares te laden.</p>';
   } else {
-    schedList.innerHTML = '<em style="color:var(--muted)">Scan het dashboard eerst om de lijst te laden</em>';
+    const sorted = state.shares.slice().sort((a, b) => a.name.localeCompare(b.name));
+    const rows = sorted.map(s => {
+      const scanChecked   = s.name in prevScan    ? prevScan[s.name]    : !excludeSet.has(s.name);
+      const rapportChecked = s.name in prevRapport ? prevRapport[s.name] : true;
+      const badge = s.analyzer_date
+        ? `<span style="font-size:10px;color:var(--success);margin-left:6px" title="Laatste Storage Analyzer scan">📊 ${escapeHtml(s.analyzer_date)}</span>`
+        : `<span style="font-size:10px;color:var(--muted);margin-left:6px">Geen rapport</span>`;
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px">${escapeHtml(s.name)}${badge}</td>
+        <td style="text-align:center;padding:5px 8px"><input type="checkbox" class="share-scan-cb" data-share="${escapeHtml(s.name)}" ${scanChecked ? 'checked' : ''}></td>
+        <td style="text-align:center;padding:5px 8px"><input type="checkbox" class="sched-share-cb" value="${escapeHtml(s.name)}" ${rapportChecked ? 'checked' : ''}></td>
+      </tr>`;
+    }).join('');
+    tableEl.innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="border-bottom:2px solid var(--border)">
+          <th style="text-align:left;padding:4px 8px;font-weight:500">Share</th>
+          <th style="text-align:center;padding:4px 8px;font-weight:500;width:54px">Scan</th>
+          <th style="text-align:center;padding:4px 8px;font-weight:500;width:64px">Rapport</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="margin-top:5px;font-size:12px;color:var(--muted)">
+        Rapport: <a href="#" onclick="schedSelectAll(true);return false" style="color:var(--primary)">Alles</a>
+        &middot; <a href="#" onclick="schedSelectAll(false);return false" style="color:var(--primary)">Geen</a>
+      </div>`;
   }
 }
 
@@ -1001,22 +1025,28 @@ function addSharePath() {
 }
 function removeSharePath(index) { state.settings.share_paths.splice(index, 1); renderSettings(); }
 
-function addExclude() {
-  const newPattern = document.getElementById('new-exclude').value.trim();
-  if (!newPattern) return;
-  state.settings.exclude_shares = [...(state.settings.exclude_shares || []), newPattern];
-  document.getElementById('new-exclude').value = '';
-  renderSettings();
-}
-function removeExclude(index) { state.settings.exclude_shares.splice(index, 1); renderSettings(); }
 
 async function saveSettings() {
   try {
     const newPassword    = document.getElementById('auth-password').value;
     const newDsmPassword = document.getElementById('dsm-password').value;
+    // Derive exclude_shares: keep @/# patterns + any named exclusion not in the table,
+    // then add any share the user unchecked in the Scan column.
+    const scanCbs = document.querySelectorAll('.share-scan-cb');
+    let newExcludeShares;
+    if (scanCbs.length > 0) {
+      const tableShareNames = new Set([...scanCbs].map(cb => cb.dataset.share));
+      const preserved = (state.settings.exclude_shares || []).filter(
+        e => e.startsWith('@') || e.startsWith('#') || !tableShareNames.has(e)
+      );
+      const unchecked = [...document.querySelectorAll('.share-scan-cb:not(:checked)')].map(cb => cb.dataset.share);
+      newExcludeShares = [...new Set([...preserved, ...unchecked])];
+    } else {
+      newExcludeShares = state.settings.exclude_shares || [];
+    }
     const payload = {
       share_paths:      state.settings.share_paths,
-      exclude_shares:   state.settings.exclude_shares,
+      exclude_shares:   newExcludeShares,
       upload_retention: parseInt(document.getElementById('upload-retention').value),
       edit_retention:   parseInt(document.getElementById('edit-retention').value),
       mailbox_gb:       parseFloat(document.getElementById('mailbox-gb').value) || 10,
