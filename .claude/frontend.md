@@ -111,9 +111,28 @@ Three sub-tabs: Uploads / Edits / Links (mappings).
 
 ## Settings tab
 `loadSettings()` / `renderSettings()` / `saveSettings()`.
-Fields: share_paths (list), exclude_shares (list), mailbox_gb (number), upload/edit retention (select 5/10/20/50).
-Auth section: `auth-username` text input + `auth-password` password input (blank = keep existing).
-`saveSettings()` includes `auth_username` always; `auth_password` only if non-empty.
+
+Fields:
+- share_paths (list), exclude_shares (list), mailbox_gb (number)
+- upload/edit retention (select 5/10/20/50)
+- Auth: `auth-username` text input + `auth-password` password input (blank = keep existing)
+- DSM section: `dsm-host`, `dsm-port`, `dsm-user`, `dsm-password` (password input)
+  - `renderSettings()` populates DSM fields from `state.settings`; shows `(wachtwoord opgeslagen)` hint when `dsm_password_set` is true
+  - `saveSettings()` always sends `dsm_host`, `dsm_port`, `dsm_user`; only sends `dsm_password` if non-empty
+
+### DSM actions
+`testDsmConnection()` — `id="dsm-test-btn"` / result in `id="dsm-test-result"`:
+- Reads current form values; if password is blank and `state.settings.dsm_password_set` is true, sends `use_stored_password: true` instead
+- POSTs to `/api/settings/test_dsm`
+- Success: `✓ Verbonden — N rapport(en) gevonden`; failure: `✗ <error>`
+
+`setupMonthlyReports()` — `id="dsm-setup-btn"` / result in `id="dsm-setup-result"`:
+- POSTs to `/api/dsm/setup_monthly_reports` (no body — uses stored DSM credentials)
+- Shows inline summary: existing reports count, newly created reports, failed ones, schedule type
+  - `monthly`: `✓ Maandelijks schema (dag 1, 03:00)`
+  - `weekly_monday`: `⚠ Wekelijks schema — maandelijks niet ondersteund door DSM API`
+  - `task_scheduler_monthly`: `✓ Task Scheduler taak aangemaakt (maandelijks, dag 1, 03:00)`
+  - no schedule: `✗ Schema instellen mislukt — stel handmatig in via DSM`
 
 ## Auth / Login
 

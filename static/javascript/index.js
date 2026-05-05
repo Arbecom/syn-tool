@@ -452,7 +452,7 @@ function renderShares() {
     return `<tr title="${escapeHtml(subtitle)}">
       <td><strong>${escapeHtml(share.name)}</strong></td>
       <td class="cell-muted cell-mono">${escapeHtml(share.path)}</td>
-      <td><strong>${escapeHtml(share.size_human)}</strong>${share.pending ? ' <span class="spinner" style="width:10px;height:10px;border-width:2px;vertical-align:middle" title="Calculating exact size…"></span>' : ''}</td>
+      <td><strong>${escapeHtml(share.size_human)}</strong>${share.pending ? ' <span class="spinner" style="width:10px;height:10px;border-width:2px;vertical-align:middle" title="Calculating exact size…"></span>' : ''}${share.analyzer_date ? ` <span style="font-size:10px;color:var(--muted);margin-left:4px" title="DSM Storage Analyzer scan date">📊 ${escapeHtml(share.analyzer_date)}</span>` : ''}</td>
       <td class="cell-mono">${share.size_gb}</td>
       <td>
         <div class="bar-wrap">
@@ -970,6 +970,12 @@ function renderSettings() {
   document.getElementById('mailbox-gb').value   = config.mailbox_gb ?? 10;
   document.getElementById('auth-username').value = config.auth_username || 'admin';
   document.getElementById('auth-password').value = '';
+  document.getElementById('dsm-host').value  = config.dsm_host || 'localhost';
+  document.getElementById('dsm-port').value  = config.dsm_port || 3333;
+  document.getElementById('dsm-user').value  = config.dsm_user || '';
+  document.getElementById('dsm-password').value = '';
+  const pwSet = document.getElementById('dsm-password-set');
+  if (pwSet) pwSet.style.display = config.dsm_password_set ? 'inline' : 'none';
 }
 
 function addSharePath() {
@@ -992,7 +998,8 @@ function removeExclude(index) { state.settings.exclude_shares.splice(index, 1); 
 
 async function saveSettings() {
   try {
-    const newPassword = document.getElementById('auth-password').value;
+    const newPassword    = document.getElementById('auth-password').value;
+    const newDsmPassword = document.getElementById('dsm-password').value;
     const payload = {
       share_paths:      state.settings.share_paths,
       exclude_shares:   state.settings.exclude_shares,
@@ -1000,13 +1007,89 @@ async function saveSettings() {
       edit_retention:   parseInt(document.getElementById('edit-retention').value),
       mailbox_gb:       parseFloat(document.getElementById('mailbox-gb').value) || 10,
       auth_username:    document.getElementById('auth-username').value,
+      dsm_host:         document.getElementById('dsm-host').value.trim(),
+      dsm_port:         parseInt(document.getElementById('dsm-port').value) || 3333,
+      dsm_user:         document.getElementById('dsm-user').value.trim(),
     };
-    if (newPassword) payload.auth_password = newPassword;
+    if (newPassword)    payload.auth_password = newPassword;
+    if (newDsmPassword) payload.dsm_password  = newDsmPassword;
     const result   = await apiPost('/api/settings', payload);
     state.settings = result.config;
     renderSettings();
     toast(translate('settings_saved'), 'success');
   } catch(error) { toast(translate('save_failed') + error.message, 'error'); }
+}
+
+async function testDsmConnection() {
+  const btn    = document.getElementById('dsm-test-btn');
+  const result = document.getElementById('dsm-test-result');
+  const password = document.getElementById('dsm-password').value ||
+                   (state.settings.dsm_password_set ? '<<stored>>' : '');
+  btn.disabled = true;
+  result.textContent = 'Bezig...';
+  result.style.color = 'var(--muted)';
+  try {
+    const payload = {
+      dsm_host:     document.getElementById('dsm-host').value.trim(),
+      dsm_port:     parseInt(document.getElementById('dsm-port').value) || 3333,
+      dsm_user:     document.getElementById('dsm-user').value.trim(),
+      dsm_password: document.getElementById('dsm-password').value,
+    };
+    if (!payload.dsm_password && state.settings.dsm_password_set) {
+      // Use stored password — pass a sentinel; backend loads it from config
+      delete payload.dsm_password;
+      payload.use_stored_password = true;
+    }
+    const data = await apiPost('/api/settings/test_dsm', payload);
+    result.textContent = `✓ Verbonden — ${data.report_count} rapport(en) gevonden`;
+    result.style.color = 'var(--success, green)';
+  } catch(err) {
+    result.textContent = `✗ ${err.message}`;
+    result.style.color = 'var(--error, red)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function setupMonthlyReports() {
+  const btn    = document.getElementById('dsm-setup-btn');
+  const result = document.getElementById('dsm-setup-result');
+  btn.disabled = true;
+  result.textContent = 'Bezig...';
+  result.style.color = 'var(--muted)';
+  try {
+    const data = await apiPost('/api/dsm/setup_monthly_reports', {});
+    const parts = [];
+
+    if (data.existing_reports.length)
+      parts.push(`${data.existing_reports.length} bestaand rapport(en)`);
+    if (data.created.length)
+      parts.push(`Aangemaakt: ${data.created.join(', ')}`);
+    if (data.failed.length) {
+      const names = data.failed.map(f => f.share || '?').join(', ');
+      parts.push(`Mislukt: ${names}`);
+    }
+
+    if (data.schedule_type === 'monthly')
+      parts.push('✓ Maandelijks schema (dag 1, 03:00)');
+    else if (data.schedule_type === 'weekly_monday')
+      parts.push('⚠ Wekelijks schema (maandag 03:00) — maandelijks niet ondersteund door DSM API');
+    else if (data.schedule_type === 'task_scheduler_monthly')
+      parts.push('✓ Task Scheduler taak aangemaakt (maandelijks, dag 1, 03:00)');
+    else
+      parts.push('✗ Schema instellen mislukt — stel handmatig in via DSM');
+
+    if (data.errors && data.errors.length)
+      parts.push(data.errors.join('; '));
+
+    result.style.color = data.schedule_set ? 'var(--success, green)' : 'var(--error, red)';
+    result.textContent = parts.join(' | ') || 'Klaar';
+  } catch(err) {
+    result.style.color = 'var(--error, red)';
+    result.textContent = `✗ ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ===================== INIT =====================

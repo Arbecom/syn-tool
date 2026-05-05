@@ -186,6 +186,37 @@
               <input type="password" id="auth-password" style="width:180px" autocomplete="new-password" placeholder="Leave blank to keep current">
             </p>
           </section>
+          <section class="settings-section">
+            <h3>DSM Storage Analyzer</h3>
+            <p style="color:var(--muted);font-size:12px;margin-bottom:10px">Nauwkeurige share-groottes rechtstreeks uit DSM Storage Analyzer (omzeilt ACL-beperkingen).</p>
+            <p class="form-row">
+              <label class="form-label">Host</label>
+              <input type="text" id="dsm-host" style="width:140px" autocomplete="off" placeholder="localhost">
+            </p>
+            <p class="form-row">
+              <label class="form-label">Port</label>
+              <input type="number" id="dsm-port" style="width:80px" min="1" max="65535" placeholder="3333">
+            </p>
+            <p class="form-row">
+              <label class="form-label">Gebruiker</label>
+              <input type="text" id="dsm-user" style="width:140px" autocomplete="off">
+            </p>
+            <p class="form-row">
+              <label class="form-label">Wachtwoord</label>
+              <input type="password" id="dsm-password" style="width:140px" autocomplete="new-password" placeholder="Leeg = ongewijzigd">
+              <span id="dsm-password-set" style="color:var(--muted);font-size:12px;margin-left:6px;display:none">✓ ingesteld</span>
+            </p>
+            <p class="form-row">
+              <label class="form-label"></label>
+              <button class="btn-secondary" onclick="testDsmConnection()" id="dsm-test-btn">Verbinding testen</button>
+              <span id="dsm-test-result" style="font-size:12px;margin-left:8px"></span>
+            </p>
+            <p class="form-row">
+              <label class="form-label"></label>
+              <button class="btn-secondary" onclick="setupMonthlyReports()" id="dsm-setup-btn">Maandelijkse rapporten instellen</button>
+              <span id="dsm-setup-result" style="font-size:12px;margin-left:8px"></span>
+            </p>
+          </section>
           <button class="btn-primary" onclick="saveSettings()" data-i18n="save_settings"></button>
         </section></section>
       </section>

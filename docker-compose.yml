@@ -20,6 +20,24 @@ services:
       - DATA_DIR=/app/data
       # Optional: set to /app/branding if the volume above is uncommented
       # - BRANDING_DIR=/app/branding
+      # --- App login (overrides UI settings) ---
+      # - SYNTOOL_AUTH_USERNAME=admin
+      # - SYNTOOL_AUTH_PASSWORD=changeme
+      # - SYNTOOL_AUTH_ENABLED=true
+      # --- DSM Storage Analyzer credentials ---
+      # - SYNTOOL_DSM_HOST=localhost
+      # - SYNTOOL_DSM_PORT=3333
+      # - SYNTOOL_DSM_USER=M365BUform
+      # - SYNTOOL_DSM_PASSWORD=secret
+      # --- Billing ---
+      # - SYNTOOL_MAILBOX_GB=10
+      # --- Docker secrets alternative (passwords only) ---
+      # Instead of inline env vars, point to secret files:
+      # - SYNTOOL_AUTH_PASSWORD_FILE=/run/secrets/auth_password
+      # - SYNTOOL_DSM_PASSWORD_FILE=/run/secrets/dsm_password
+    # secrets:
+    #   - auth_password
+    #   - dsm_password
     privileged: true
     pid: host
     restart: unless-stopped

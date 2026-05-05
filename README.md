@@ -90,3 +90,74 @@ cd /volume1/tools/syn-tool
 sudo git pull
 sudo ./start.sh
 ```
+
+---
+
+## DSM Storage Analyzer integration (accurate share sizes)
+
+Active Backup shares (GsuiteBackup, Office365BackUp, M365-BU-*) have ACL restrictions that
+prevent `du` from reading their full contents — even as root. DSM's Storage Analyzer runs with
+internal kernel privileges that bypass these restrictions and reports the correct sizes.
+
+The tool integrates with Storage Analyzer automatically:
+1. Run Storage Analyzer in DSM for each share you want sized accurately (one-time setup)
+2. Enter your DSM credentials in **Settings → DSM Storage Analyzer**
+3. On every scan the tool fetches the latest report data — no manual re-running needed
+
+If no Storage Analyzer report exists for a share, the tool falls back to `du`/`btrfs`.
+
+---
+
+## Environment variables / Docker secrets
+
+All credentials can be injected without touching the UI — useful for Docker deployments
+or automated setups.
+
+| Variable | Description |
+|---|---|
+| `SYNTOOL_AUTH_USERNAME` | App login username |
+| `SYNTOOL_AUTH_PASSWORD` | App login password (stored as PBKDF2 hash) |
+| `SYNTOOL_AUTH_ENABLED` | `true` / `false` |
+| `SYNTOOL_DSM_HOST` | DSM hostname or IP (default: `localhost`) |
+| `SYNTOOL_DSM_PORT` | DSM HTTP API port (default: `3333`) |
+| `SYNTOOL_DSM_USER` | DSM username |
+| `SYNTOOL_DSM_PASSWORD` | DSM password (stored encrypted) |
+| `SYNTOOL_MAILBOX_GB` | GB included free per mailbox in billing formula |
+
+### Docker secrets (recommended for passwords)
+
+**Option 1** — `_FILE` variant pointing to a Docker secret:
+```yaml
+environment:
+  - SYNTOOL_AUTH_PASSWORD_FILE=/run/secrets/auth_password
+  - SYNTOOL_DSM_PASSWORD_FILE=/run/secrets/dsm_password
+secrets:
+  - auth_password
+  - dsm_password
+
+secrets:
+  auth_password:
+    file: ./secrets/auth_password.txt
+  dsm_password:
+    file: ./secrets/dsm_password.txt
+```
+
+**Option 2** — Drop plain-text files at `/run/secrets/auth_password` and
+`/run/secrets/dsm_password` inside the container — auto-discovered.
+
+### Example docker-compose environment block
+```yaml
+environment:
+  - PORT=9000
+  - HOST=0.0.0.0
+  - DATA_DIR=/app/data
+  - SYNTOOL_AUTH_USERNAME=admin
+  - SYNTOOL_AUTH_PASSWORD=changeme
+  - SYNTOOL_DSM_HOST=localhost
+  - SYNTOOL_DSM_PORT=3333
+  - SYNTOOL_DSM_USER=MyDSMUser
+  - SYNTOOL_DSM_PASSWORD=MyDSMPass
+```
+
+Passwords set via env vars are hashed/encrypted once on first use and written to `config.json`.
+UI-saved settings remain as fallback when env vars are absent.

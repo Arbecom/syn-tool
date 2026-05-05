@@ -8,13 +8,16 @@ Scan NAS shares, manage billing Excel, track version history.
 """
 
 import os
+import re
 import json
 import subprocess
 import datetime
 import io
 import threading
-import queue
 import hashlib
+import http.cookiejar
+import urllib.request
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 import secrets
@@ -53,6 +56,10 @@ DEFAULT_CONFIG = {
     "auth_enabled":      True,
     "auth_username":     "admin",
     "auth_password":     "admin",
+    "dsm_host":          "localhost",
+    "dsm_port":          3333,
+    "dsm_user":          "",
+    "dsm_password":      "",
 }
 
 # ---------------------------------------------------------------------------
@@ -74,8 +81,9 @@ def load_config() -> dict:
             cfg = json.load(f)
         for k, v in DEFAULT_CONFIG.items():
             cfg.setdefault(k, v)
-        return cfg
-    return dict(DEFAULT_CONFIG)
+    else:
+        cfg = dict(DEFAULT_CONFIG)
+    return _apply_env_overrides(cfg)
 
 
 def save_config(cfg: dict):
@@ -103,6 +111,29 @@ def save_apparent_cache(cache: dict):
 
 _PBKDF2_ITERS = 50000
 
+def _encrypt_credential(plaintext: str) -> str:
+    """Encrypt a credential with the app secret key. Stored as 'enc:<base64>'."""
+    import base64
+    data   = plaintext.encode('utf-8')
+    iv     = secrets.token_bytes(16)
+    secret = (DATA_DIR / ".secret_key").read_text().strip().encode()
+    key    = hashlib.pbkdf2_hmac('sha256', secret, iv, 1000, dklen=len(data))
+    return 'enc:' + base64.b64encode(iv + bytes(b ^ k for b, k in zip(data, key))).decode()
+
+def _decrypt_credential(stored: str) -> str:
+    """Decrypt a credential encrypted by _encrypt_credential. Returns plaintext."""
+    import base64
+    if not stored.startswith('enc:'):
+        return stored  # legacy plaintext — transparently supported
+    try:
+        raw     = base64.b64decode(stored[4:])
+        iv, enc = raw[:16], raw[16:]
+        secret  = (DATA_DIR / ".secret_key").read_text().strip().encode()
+        key     = hashlib.pbkdf2_hmac('sha256', secret, iv, 1000, dklen=len(enc))
+        return bytes(b ^ k for b, k in zip(enc, key)).decode('utf-8')
+    except Exception:
+        return ''
+
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
     h = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), _PBKDF2_ITERS)
@@ -117,6 +148,69 @@ def verify_password(password: str, stored: str) -> bool:
         return h.hex() == expected
     except Exception:
         return False
+
+
+def _read_secret(env_name: str) -> Optional[str]:
+    """Read a sensitive value from (in priority order):
+    1. {env_name}_FILE env var → path to a file (Docker secrets pattern)
+    2. {env_name} env var directly
+    3. /run/secrets/<lowercase-name-without-SYNTOOL_prefix>  (Docker swarm default)
+    """
+    file_path = os.environ.get(f"{env_name}_FILE")
+    if file_path:
+        try:
+            return Path(file_path).read_text().strip() or None
+        except OSError:
+            pass
+    val = os.environ.get(env_name)
+    if val:
+        return val
+    secret_name = env_name.replace("SYNTOOL_", "").lower()
+    secret_path = Path("/run/secrets") / secret_name
+    if secret_path.exists():
+        try:
+            return secret_path.read_text().strip() or None
+        except OSError:
+            pass
+    return None
+
+
+def _apply_env_overrides(cfg: dict) -> dict:
+    """Apply SYNTOOL_* environment variables (and Docker secrets) on top of config.
+    Non-secret settings are applied on every call. Passwords are hashed/encrypted
+    once and written back to config — a sentinel detects when the env value changes."""
+    for env_key, cfg_key, conv in [
+        ("SYNTOOL_AUTH_USERNAME", "auth_username", str),
+        ("SYNTOOL_AUTH_ENABLED",  "auth_enabled",  lambda v: v.strip().lower() in ("true", "1", "yes")),
+        ("SYNTOOL_DSM_HOST",      "dsm_host",      str),
+        ("SYNTOOL_DSM_PORT",      "dsm_port",      int),
+        ("SYNTOOL_DSM_USER",      "dsm_user",      str),
+        ("SYNTOOL_MAILBOX_GB",    "mailbox_gb",    float),
+    ]:
+        val = os.environ.get(env_key)
+        if val is not None:
+            try:
+                cfg[cfg_key] = conv(val)
+            except (ValueError, TypeError):
+                pass
+
+    auth_pw = _read_secret("SYNTOOL_AUTH_PASSWORD")
+    if auth_pw:
+        sentinel = hashlib.sha256(auth_pw.encode()).hexdigest()
+        if cfg.get("_env_auth_pw_sentinel") != sentinel:
+            cfg["auth_password"]         = hash_password(auth_pw)
+            cfg["_env_auth_pw_sentinel"] = sentinel
+            save_config(cfg)
+
+    dsm_pw = _read_secret("SYNTOOL_DSM_PASSWORD")
+    if dsm_pw:
+        sentinel = hashlib.sha256(dsm_pw.encode()).hexdigest()
+        if cfg.get("_env_dsm_pw_sentinel") != sentinel:
+            cfg["dsm_password"]         = _encrypt_credential(dsm_pw)
+            cfg["_env_dsm_pw_sentinel"] = sentinel
+            save_config(cfg)
+
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +353,74 @@ def compute_mapping_diff(headers: list, rows: list, mappings: dict) -> dict:
 # NAS share scanning
 # ---------------------------------------------------------------------------
 
+def _get_dsm_analyzer_sizes(cfg: dict):
+    """Fetch share sizes from DSM Storage Analyzer via HTTP API.
+    Authenticates, lists Storage Analyzer reports, fetches each report HTML,
+    and parses the embedded JS array: ['ShareName', 'volume_N', 'size_bytes', ...]
+    Returns (sizes, dates) where both are {share_name: value}:
+      sizes — {share_name: size_bytes}
+      dates — {share_name: 'YYYY-MM-DD'} date of the most recent report scanned"""
+    host     = str(cfg.get('dsm_host', '')).strip()
+    port     = cfg.get('dsm_port', 3333)
+    user     = str(cfg.get('dsm_user', '')).strip()
+    password = _decrypt_credential(str(cfg.get('dsm_password', '')).strip())
+
+    if not host or not user or not password:
+        return {}, {}
+
+    base_url = f"http://{host}:{port}"
+    cj       = http.cookiejar.CookieJar()
+    opener   = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+    login_data = urllib.parse.urlencode({
+        'api': 'SYNO.API.Auth', 'version': '3', 'method': 'login',
+        'account': user, 'passwd': password,
+        'session': 'SynologyTool', 'format': 'cookie',
+    })
+    try:
+        resp = opener.open(f"{base_url}/webapi/entry.cgi", login_data.encode(), timeout=10)
+        if not json.loads(resp.read()).get('success'):
+            return {}, {}
+    except Exception:
+        return {}, {}
+
+    list_data = urllib.parse.urlencode({
+        'api': 'SYNO.Core.Report', 'version': '1', 'method': 'list',
+    })
+    try:
+        resp    = opener.open(f"{base_url}/webapi/entry.cgi", list_data.encode(), timeout=15)
+        reports = json.loads(resp.read()).get('data', {}).get('reports', [])
+    except Exception:
+        return {}, {}
+
+    sizes   = {}
+    dates   = {}
+    pattern = re.compile(r"\[\s*'([^']+)'\s*,\s*'volume_\d+'\s*,\s*'(\d+)'")
+
+    for report in reports:
+        link = report.get('link', '')
+        if not link or report.get('status') != 'success':
+            continue
+        # Extract scan date from link path: /dar/Report Name/2026-04-28_08-55-48/report.html
+        scan_date = ''
+        parts = link.rstrip('/').split('/')
+        if len(parts) >= 2:
+            ts = parts[-2]           # e.g. '2026-04-28_08-55-48'
+            scan_date = ts[:10]      # 'YYYY-MM-DD'
+        try:
+            resp = opener.open(base_url + urllib.parse.quote(link), timeout=30)
+            html = resp.read().decode('utf-8', errors='replace')
+        except Exception:
+            continue
+        for m in pattern.finditer(html):
+            name, sz = m.group(1), int(m.group(2))
+            if sz > sizes.get(name, 0):
+                sizes[name] = sz
+                dates[name] = scan_date
+
+    return sizes, dates
+
+
 def _btrfs_sizes_for_paths(paths: list, base: str):
     """Return (sizes, du_needed) where sizes is {path: size_bytes} and du_needed is
     the set of paths where level-1 > level-0, meaning nested subvolumes cause btrfs
@@ -332,28 +494,6 @@ def _btrfs_sizes_for_paths(paths: list, base: str):
     return sizes, du_needed
 
 
-def _du_size(path: str):
-    """Return (size_bytes, warning_or_None) using apparent (logical) file sizes,
-    matching DSM File Station for all share types including Active Backup."""
-    try:
-        r = subprocess.run(
-            ["du", "--apparent-size", "--bytes", "-s", path],
-            capture_output=True, text=True, timeout=1800
-        )
-        if r.returncode == 0:
-            return int(r.stdout.split()[0]), None
-        # BusyBox fallback
-        r = subprocess.run(["du", "-sb", path], capture_output=True, text=True, timeout=1800)
-        if r.returncode == 0:
-            return int(r.stdout.split()[0]), None
-        warning = (r.stderr.strip() or "Could not read size").split("\n")[0]
-        return 0, warning
-    except subprocess.TimeoutExpired:
-        return 0, "Scan timed out"
-    except Exception as ex:
-        return 0, str(ex)
-
-
 def bytes_to_gb(b: int) -> float:
     return round(b / (1024 ** 3), 2)
 
@@ -381,8 +521,6 @@ def api_shares_stream():
 
         try:
             apparent_cache = load_apparent_cache()
-            apparent_lock  = threading.Lock()
-
             shares_to_scan = []
             volumes = {}
 
@@ -424,87 +562,55 @@ def api_shares_stream():
                 yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
                 return
 
+            # Fetch Storage Analyzer sizes via DSM HTTP API (accurate, bypasses ACLs).
+            # Shares covered by analyzer skip du entirely; others fall back to du/btrfs.
+            analyzer_sizes: dict = {}
+            analyzer_dates: dict = {}
+            if cfg.get('dsm_user') and cfg.get('dsm_password'):
+                try:
+                    analyzer_sizes, analyzer_dates = _get_dsm_analyzer_sizes(cfg)
+                except Exception:
+                    pass
+
             btrfs_sizes: dict = {}
             for base in set(b for b, p, n in shares_to_scan):
                 paths = [p for b2, p, n in shares_to_scan if b2 == base]
                 sz, _ = _btrfs_sizes_for_paths(paths, base)
                 btrfs_sizes.update(sz)
 
-            # ── Phase 1: emit every share immediately with best available estimate ──
-            # All shares are pending — du --apparent-size always provides accurate
-            # final values matching DSM File Station (btrfs qgroup is unreliable for
-            # Active Backup shares due to reflink/clone-extent sharing).
+            # Emit every share immediately — analyzer sizes are accurate; others
+            # fall back to btrfs qgroup or last-known cache value.
             all_shares_collected: list = []
-            pending_shares: list = list(shares_to_scan)
 
             for base, path, name in shares_to_scan:
-                sb = apparent_cache.get(path, btrfs_sizes.get(path, 0))
-                share = {
-                    "name": name, "path": path, "base": base,
-                    "size_bytes": sb, "size_gb": bytes_to_gb(sb),
-                    "size_human": human_size(sb), "pending": True,
-                }
-                all_shares_collected.append(share)
-                yield f'data: {json.dumps({"type":"share","share":share})}\n\n'
+                analyzer_bytes = analyzer_sizes.get(name, 0)
+                if analyzer_bytes > 0:
+                    sb = analyzer_bytes
+                    apparent_cache[path] = sb
+                else:
+                    sb = apparent_cache.get(path, btrfs_sizes.get(path, 0))
 
-            # Write cache with phase-1 data (pending shares have estimated sizes)
-            try:
-                with open(DATA_DIR / "shares_cache.json", "w") as f:
-                    json.dump({"shares": all_shares_collected, "volumes": volumes,
-                               "scanned_at": datetime.datetime.now().isoformat(),
-                               "partial": bool(pending_shares)}, f, default=str)
-            except Exception:
-                pass
-
-            yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
-
-            # ── Phase 2: du --apparent-size for all shares ─────────────────────
-            du_q: queue.Queue = queue.Queue()
-            sem = threading.Semaphore(4)
-
-            def du_scan(base, path, name):
-                with sem:
-                    sb, warning = _du_size(path)
-                with apparent_lock:
-                    if sb > 0:
-                        apparent_cache[path] = sb
-                        save_apparent_cache(apparent_cache)
-                    else:
-                        sb = apparent_cache.get(path, btrfs_sizes.get(path, 0))
                 share = {
                     "name": name, "path": path, "base": base,
                     "size_bytes": sb, "size_gb": bytes_to_gb(sb),
                     "size_human": human_size(sb), "pending": False,
+                    "analyzer_date": analyzer_dates.get(name, ""),
                 }
-                msg: dict = {"type": "share_update", "share": share}
-                if warning:
-                    msg["warning"] = warning
-                du_q.put(msg)
+                all_shares_collected.append(share)
+                yield f'data: {json.dumps({"type":"share","share":share})}\n\n'
 
-            for base, path, name in pending_shares:
-                threading.Thread(target=du_scan, args=(base, path, name), daemon=True).start()
+            if analyzer_sizes:
+                save_apparent_cache(apparent_cache)
 
-            received = 0
-            while received < len(pending_shares):
-                try:
-                    msg = du_q.get(timeout=0.5)
-                    received += 1
-                    # Update in-memory collection and rewrite cache
-                    for i, s in enumerate(all_shares_collected):
-                        if s["path"] == msg["share"]["path"]:
-                            all_shares_collected[i] = msg["share"]
-                            break
-                    try:
-                        with open(DATA_DIR / "shares_cache.json", "w") as f:
-                            json.dump({"shares": all_shares_collected, "volumes": volumes,
-                                       "scanned_at": datetime.datetime.now().isoformat(),
-                                       "partial": received < len(pending_shares)}, f, default=str)
-                    except Exception:
-                        pass
-                    yield f'data: {json.dumps(msg)}\n\n'
-                except queue.Empty:
-                    yield ': keepalive\n\n'
+            try:
+                with open(DATA_DIR / "shares_cache.json", "w") as f:
+                    json.dump({"shares": all_shares_collected, "volumes": volumes,
+                               "scanned_at": datetime.datetime.now().isoformat(),
+                               "partial": False}, f, default=str)
+            except Exception:
+                pass
 
+            yield f'data: {json.dumps({"type":"done","volumes":volumes})}\n\n'
             yield f'data: {json.dumps({"type":"all_done"})}\n\n'
 
         finally:
@@ -933,6 +1039,8 @@ def api_mappings_restore(snap_id):
 def api_settings_get():
     cfg = load_config()
     cfg.pop('auth_password', None)
+    cfg.pop('dsm_password', None)
+    cfg['dsm_password_set'] = bool(load_config().get('dsm_password'))
     return jsonify(cfg)
 
 
@@ -966,12 +1074,244 @@ def api_settings_post():
     if "auth_password" in body and str(body["auth_password"]).strip():
         cfg["auth_password"] = hash_password(str(body["auth_password"]).strip())
 
+    for key in ("dsm_host", "dsm_user"):
+        if key in body:
+            cfg[key] = str(body[key]).strip()
+    if "dsm_port" in body:
+        try:
+            val = int(body["dsm_port"])
+            if 1 <= val <= 65535:
+                cfg["dsm_port"] = val
+        except (ValueError, TypeError):
+            pass
+    if "dsm_password" in body and str(body["dsm_password"]).strip():
+        cfg["dsm_password"] = _encrypt_credential(str(body["dsm_password"]).strip())
+
     save_config(cfg)
     _apply_retention(UPLOADS_DIR, "*.xlsx", cfg["upload_retention"])
     _apply_retention(UPLOADS_DIR, "*.xls",  cfg["upload_retention"])
     _apply_retention(EDITS_DIR,   "*.json", cfg["edit_retention"])
     cfg.pop('auth_password', None)
     return jsonify({"success": True, "config": cfg})
+
+@app.route("/api/settings/test_dsm", methods=["POST"])
+def api_test_dsm():
+    body     = request.get_json() or {}
+    host     = str(body.get('dsm_host', '')).strip()
+    user     = str(body.get('dsm_user', '')).strip()
+    password = str(body.get('dsm_password', '')).strip()
+    try:
+        port = int(body.get('dsm_port', 3333))
+    except (ValueError, TypeError):
+        port = 3333
+
+    # Frontend may omit password when using the already-stored one
+    if not password and body.get('use_stored_password'):
+        password = _decrypt_credential(str(load_config().get('dsm_password', '')).strip())
+
+    if not host or not user or not password:
+        return jsonify({'error': 'Vul host, gebruiker en wachtwoord in'}), 400
+
+    base_url = f"http://{host}:{port}"
+    cj       = http.cookiejar.CookieJar()
+    opener   = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+    try:
+        login_data = urllib.parse.urlencode({
+            'api': 'SYNO.API.Auth', 'version': '3', 'method': 'login',
+            'account': user, 'passwd': password,
+            'session': 'SynologyToolTest', 'format': 'cookie',
+        })
+        resp   = opener.open(f"{base_url}/webapi/entry.cgi", login_data.encode(), timeout=10)
+        result = json.loads(resp.read())
+        if not result.get('success'):
+            code = result.get('error', {}).get('code', '?')
+            return jsonify({'error': f'DSM login mislukt (code {code})'}), 400
+
+        list_data = urllib.parse.urlencode({
+            'api': 'SYNO.Core.Report', 'version': '1', 'method': 'list',
+        })
+        resp    = opener.open(f"{base_url}/webapi/entry.cgi", list_data.encode(), timeout=15)
+        result  = json.loads(resp.read())
+        if not result.get('success'):
+            return jsonify({'error': 'Login gelukt maar Storage Analyzer API niet beschikbaar'}), 400
+
+        reports = result['data'].get('reports', [])
+        return jsonify({'success': True, 'report_count': len(reports)})
+    except Exception as ex:
+        return jsonify({'error': str(ex)}), 500
+
+
+# ---------------------------------------------------------------------------
+# DSM monthly reports setup
+# ---------------------------------------------------------------------------
+
+@app.route("/api/dsm/setup_monthly_reports", methods=["POST"])
+def api_dsm_setup_monthly_reports():
+    cfg      = load_config()
+    dsm_user = cfg.get('dsm_user', '').strip()
+    dsm_pw_enc = cfg.get('dsm_password', '').strip()
+    dsm_host = cfg.get('dsm_host', 'localhost')
+    dsm_port = int(cfg.get('dsm_port', 3333))
+
+    if not dsm_user or not dsm_pw_enc:
+        return jsonify({'error': 'DSM-inloggegevens niet ingesteld in Instellingen'}), 400
+
+    dsm_pw   = _decrypt_credential(dsm_pw_enc)
+    base_url = f"http://{dsm_host}:{dsm_port}"
+    exclude  = set(cfg.get('exclude_shares', []))
+
+    cj     = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+    def dsm_post(params):
+        data = urllib.parse.urlencode(params)
+        resp = opener.open(f"{base_url}/webapi/entry.cgi", data.encode(), timeout=15)
+        return json.loads(resp.read())
+
+    # Authenticate
+    try:
+        r = dsm_post({
+            'api': 'SYNO.API.Auth', 'version': '3', 'method': 'login',
+            'account': dsm_user, 'passwd': dsm_pw,
+            'session': 'SynologyToolSetup', 'format': 'cookie',
+        })
+        if not r.get('success'):
+            code = r.get('error', {}).get('code', '?')
+            return jsonify({'error': f'DSM login mislukt (code {code})'}), 400
+    except Exception as ex:
+        return jsonify({'error': f'DSM verbindingsfout: {ex}'}), 500
+
+    out = {
+        'existing_reports': [],
+        'covered_shares':   [],
+        'created':          [],
+        'failed':           [],
+        'schedule':         {},
+        'schedule_type':    None,
+        'schedule_set':     False,
+        'task_created':     False,
+        'errors':           [],
+    }
+
+    # List existing reports
+    try:
+        r       = dsm_post({'api': 'SYNO.Core.Report', 'version': '1', 'method': 'list'})
+        reports = r.get('data', {}).get('reports', []) if r.get('success') else []
+    except Exception as ex:
+        reports = []
+        out['errors'].append(f'Rapportlijst ophalen mislukt: {ex}')
+
+    covered = set()
+    for rpt in reports:
+        rname = rpt.get('name', '')
+        if rname:
+            out['existing_reports'].append(rname)
+        for sh in rpt.get('shares', []):
+            if isinstance(sh, str):
+                covered.add(sh)
+            elif isinstance(sh, dict):
+                covered.add(sh.get('name', '') or sh.get('share_name', ''))
+
+    # Get current schedule config
+    try:
+        r = dsm_post({'api': 'SYNO.Core.Report.Config', 'version': '1', 'method': 'get'})
+        if r.get('success'):
+            out['schedule'] = r.get('data', {})
+    except Exception:
+        pass
+
+    report_location = out['schedule'].get('report_location', '')
+
+    # Discover non-filtered shares from configured share paths
+    non_filtered = set()
+    for sp in cfg.get('share_paths', ['/volume1']):
+        try:
+            for entry in os.listdir(sp):
+                if entry not in exclude and not entry.startswith('@') and not entry.startswith('#'):
+                    non_filtered.add(entry)
+        except Exception:
+            pass
+
+    out['covered_shares'] = sorted(covered)
+    uncovered = sorted(non_filtered - covered)
+
+    # Create Storage Analyzer report profiles for uncovered shares
+    for share in uncovered:
+        # Use a safe, unique id derived from share name (lowercase, underscores)
+        report_id = 'syntool_' + re.sub(r'[^a-z0-9_]', '_', share.lower())
+        try:
+            r = dsm_post({
+                'api': 'SYNO.Core.Report', 'version': '1', 'method': 'create',
+                'id': report_id,
+                'shares[]': share,
+            })
+            if r.get('success'):
+                out['created'].append(share)
+                covered.add(share)
+            else:
+                code = r.get('error', {}).get('code', '?')
+                msg  = r.get('error', {}).get('errors', {}).get('msg', '')
+                if code == 4907:
+                    # Folder already exists — report already set up under a different name
+                    out['covered_shares'].append(share)
+                    covered.add(share)
+                else:
+                    out['failed'].append({'share': share, 'code': code, 'msg': msg})
+        except Exception as ex:
+            out['failed'].append({'share': share, 'error': str(ex)})
+
+    # Set schedule — try monthly first, then weekly as fallback
+    schedule_set = False
+    for attempt, label in [
+        ({'schedule_type': 'monthly', 'month_day': '1', 'hour': '3', 'minute': '0',
+          'report_location': report_location}, 'monthly'),
+        ({'month_day': '1', 'hour': '3', 'minute': '0',
+          'report_location': report_location}, 'monthly'),
+        ({'week_day': '1', 'hour': '3', 'minute': '0',
+          'report_location': report_location}, 'weekly_monday'),
+    ]:
+        if schedule_set:
+            break
+        try:
+            r = dsm_post(dict(api='SYNO.Core.Report.Config', version='1', method='set', **attempt))
+            if r.get('success'):
+                schedule_set = True
+                out['schedule_type'] = label
+        except Exception:
+            pass
+
+    # Fallback: create a DSM Task Scheduler script task for monthly execution
+    if not schedule_set:
+        cmd = '/usr/syno/bin/syno_volume_analyze -w eval-timetable'
+        try:
+            schedule_json = json.dumps({
+                'date': '1', 'date_type': 0,
+                'hour': 3, 'minute': 0, 'repeat_min': 0,
+                'week_day': '0,1,2,3,4,5,6',
+            })
+            r = dsm_post({
+                'api': 'SYNO.Core.TaskScheduler', 'version': '4', 'method': 'create',
+                'name': 'Storage Analyzer Maandelijks',
+                'owner': 'root', 'enable': 'true',
+                'schedule': schedule_json,
+                'task_type': 'script',
+                'script': cmd,
+            })
+            if r.get('success'):
+                schedule_set = True
+                out['schedule_type'] = 'task_scheduler_monthly'
+                out['task_created']  = True
+            else:
+                code = r.get('error', {}).get('code', '?')
+                out['errors'].append(f'Task Scheduler aanmaken mislukt (code {code}) — stel handmatig in via DSM')
+        except Exception as ex:
+            out['errors'].append(f'Task Scheduler fout: {ex}')
+
+    out['schedule_set']     = schedule_set
+    out['covered_shares']   = sorted(covered)
+    return jsonify({'success': True, **out})
+
 
 # ---------------------------------------------------------------------------
 # Entry point
