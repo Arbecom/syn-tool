@@ -44,6 +44,20 @@ const LANG = {
     volume_info: 'Volume: {total} total, {free} free',
     scanning: 'Scanning {done} of {total}…', scan_error: 'Scan error: ',
     scan_busy: 'Scan already in progress — showing cached data.',
+    cached: 'Cached', cached_since: 'Cached since {date}',
+    shares_select: 'Select which shares are included in the dashboard scan.',
+    analyzer_info: 'Accurate share sizes directly from DSM Storage Analyzer (bypasses ACL restrictions).',
+    login: 'Login', username: 'Username', password: 'Password', password_blank: 'Leave blank to keep current',
+    dsm_storage_analyzer: 'DSM Storage Analyzer', host: 'Host', port: 'Port', user: 'User',
+    password_blank_dsm: 'Blank = unchanged', test_connection: 'Test Connection', testing: 'Testing…',
+    connected_found_reports: '✓ Connected — {count} report(s) found',
+    scan_first: 'Scan the dashboard first to load shares.',
+    analyzer_scan_date: 'Latest Storage Analyzer scan', no_report: 'No report',
+    scan_header: 'Scan', share_header: 'Share',
+    dsm_password_set_hint: '✓ configured',
+    pending_calc: 'Calculating {count} share(s)…',
+    cache_indicator: 'Cached',
+    connection_lost: 'Connection lost',
   },
   nl: {
     brand: 'Opslag\nBeheer',
@@ -87,6 +101,20 @@ const LANG = {
     volume_info: 'Volume: {total} totaal, {free} vrij',
     scanning: '{done} van {total} scannen…', scan_error: 'Scan fout: ',
     scan_busy: 'Scan al bezig — gecachte data wordt getoond.',
+    cached: 'Gecacht', cached_since: 'Gecacht sinds {date}',
+    shares_select: 'Selecteer welke shares worden meegenomen in de dashboardscan.',
+    analyzer_info: 'Nauwkeurige share-groottes rechtstreeks uit DSM Storage Analyzer (omzeilt ACL-beperkingen).',
+    login: 'Login', username: 'Gebruikersnaam', password: 'Wachtwoord', password_blank: 'Leeg = ongewijzigd',
+    dsm_storage_analyzer: 'DSM Storage Analyzer', host: 'Host', port: 'Poort', user: 'Gebruiker',
+    password_blank_dsm: 'Leeg = ongewijzigd', test_connection: 'Verbinding testen', testing: 'Bezig…',
+    connected_found_reports: '✓ Verbonden — {count} rapport(en) gevonden',
+    scan_first: 'Scan het dashboard eerst om shares te laden.',
+    analyzer_scan_date: 'Laatste Storage Analyzer scan', no_report: 'Geen rapport',
+    scan_header: 'Scan', share_header: 'Share',
+    dsm_password_set_hint: '✓ ingesteld',
+    pending_calc: 'Berekenen {count} share(s)…',
+    cache_indicator: 'Gecacht',
+    connection_lost: 'Verbinding verbroken',
   },
 };
 
@@ -120,6 +148,9 @@ function applyTranslations() {
     if (el.tagName === 'INPUT') el.placeholder = translate(key);
     else el.textContent = translate(key);
   });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    el.placeholder = translate(el.dataset.i18nPlaceholder);
+  });
   const brandEl = document.querySelector('.sidebar-brand > span[data-i18n="brand"]');
   if (brandEl) brandEl.innerHTML = translate('brand').replace('\n', '<br>');
 }
@@ -137,7 +168,7 @@ function rerenderCurrentTab() {
 
 // ===================== STATE =====================
 const state = {
-  shares: [], volumes: {}, activeScanStream: null, sharesUpdatedAt: null,
+  shares: [], volumes: {}, activeScanStream: null, sharesUpdatedAt: null, sharesFromCache: false,
   sharesSort: { column: 'size_bytes', direction: 'desc' },
   pendingSharePaths: new Set(),
   excelData:  { headers: [], rows: [], _meta: {} },
@@ -265,6 +296,7 @@ async function loadShares() {
       state.shares          = cached.shares;
       state.volumes         = cached.volumes || {};
       state.sharesUpdatedAt = cached.scanned_at || null;
+      state.sharesFromCache = true;
       renderShares();
     } else {
       document.getElementById('shares-body').innerHTML =
@@ -335,7 +367,7 @@ async function loadShares() {
     updateExcelPendingState();
     if (!state.shares.length) {
       document.getElementById('shares-body').innerHTML =
-        `<tr><td colspan="5" style="color:var(--danger);padding:16px">${translate('scan_error')}Connection lost</td></tr>`;
+        `<tr><td colspan="5" style="color:var(--danger);padding:16px">${translate('scan_error')}${translate('connection_lost')}</td></tr>`;
     } else {
       onScanComplete(warnings);
     }
@@ -344,6 +376,7 @@ async function loadShares() {
 
 function onScanComplete(warnings) {
   state.sharesUpdatedAt = new Date().toISOString();
+  state.sharesFromCache = false;
   renderShares();
   warnings.forEach(warning => toast(warning, 'warning'));
   document.getElementById('sync-btn').disabled = !state.shares.length || !state.editBuffer.length;
@@ -396,10 +429,16 @@ function renderShares() {
   if (updatedEl) {
     updatedEl.classList.toggle('is-scanning', isActivelyScanning);
     if (isActivelyScanning && state.shares.length > 0) {
+      updatedEl.style.color = '';
       updatedEl.textContent = translate('scanning', {done: completedShares.length, total: state.shares.length});
     } else if (state.pendingSharePaths.size > 0) {
-      updatedEl.textContent = `Calculating ${state.pendingSharePaths.size} share${state.pendingSharePaths.size > 1 ? 's' : ''}…`;
+      updatedEl.style.color = '';
+      updatedEl.textContent = translate('pending_calc', {count: state.pendingSharePaths.size});
+    } else if (state.sharesFromCache && state.sharesUpdatedAt) {
+      updatedEl.style.color = 'var(--warning)';
+      updatedEl.textContent = translate('cached_since', {date: formatDate(state.sharesUpdatedAt)});
     } else {
+      updatedEl.style.color = '';
       updatedEl.textContent = state.sharesUpdatedAt ? translate('updated') + ': ' + formatDate(state.sharesUpdatedAt) : '';
     }
   }
@@ -453,7 +492,7 @@ function renderShares() {
     return `<tr title="${escapeHtml(subtitle)}">
       <td><strong>${escapeHtml(share.name)}</strong></td>
       <td class="cell-muted cell-mono">${escapeHtml(share.path)}</td>
-      <td><strong>${escapeHtml(share.size_human)}</strong>${share.pending ? ' <span class="spinner" style="width:10px;height:10px;border-width:2px;vertical-align:middle" title="Calculating exact size…"></span>' : ''}${share.analyzer_date ? ` <span style="font-size:10px;color:var(--muted);margin-left:4px" title="DSM Storage Analyzer scan date">📊 ${escapeHtml(share.analyzer_date)}</span>` : ''}</td>
+      <td><strong>${escapeHtml(share.size_human)}</strong>${share.pending ? ' <span class="spinner" style="width:10px;height:10px;border-width:2px;vertical-align:middle" title="Calculating exact size…"></span>' : ''}${share.analyzer_date ? ` <span style="font-size:10px;color:var(--muted);margin-left:4px" title="${translate('analyzer_scan_date')}">📊 ${escapeHtml(share.analyzer_date)}</span>` : ''}${share.is_from_cache ? ` <span style="font-size:10px;background:var(--warning);color:#fff;padding:1px 5px;border-radius:3px;margin-left:4px" title="${translate('cached_since', {date: formatDate(state.sharesUpdatedAt)})}">${translate('cache_indicator')}</span>` : ''}</td>
       <td class="cell-mono">${share.size_gb}</td>
       <td>
         <div class="bar-wrap">
@@ -981,14 +1020,14 @@ function renderSettings() {
   const tableEl = document.getElementById('unified-shares-table');
   const excludeSet = new Set(config.exclude_shares || []);
   if (!state.shares.length) {
-    tableEl.innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0">Scan het dashboard eerst om shares te laden.</p>';
+    tableEl.innerHTML = `<p style="color:var(--muted);font-size:13px;margin:0">${translate('scan_first')}</p>`;
   } else {
     const sorted = state.shares.slice().sort((a, b) => a.name.localeCompare(b.name));
     const rows = sorted.map(s => {
       const scanChecked = s.name in prevScan ? prevScan[s.name] : !excludeSet.has(s.name);
       const badge = s.analyzer_date
-        ? `<span style="font-size:10px;color:var(--success);margin-left:6px" title="Laatste Storage Analyzer scan">📊 ${escapeHtml(s.analyzer_date)}</span>`
-        : `<span style="font-size:10px;color:var(--muted);margin-left:6px">Geen rapport</span>`;
+        ? `<span style="font-size:10px;color:var(--success);margin-left:6px" title="${translate('analyzer_scan_date')}">📊 ${escapeHtml(s.analyzer_date)}</span>`
+        : `<span style="font-size:10px;color:var(--muted);margin-left:6px">${translate('no_report')}</span>`;
       return `<tr style="border-bottom:1px solid var(--border)">
         <td style="text-align:center;padding:5px 8px;width:40px"><input type="checkbox" class="share-scan-cb" data-share="${escapeHtml(s.name)}" ${scanChecked ? 'checked' : ''}></td>
         <td style="padding:5px 8px">${escapeHtml(s.name)}${badge}</td>
@@ -997,8 +1036,8 @@ function renderSettings() {
     tableEl.innerHTML = `
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr style="border-bottom:2px solid var(--border)">
-          <th style="text-align:center;padding:4px 8px;font-weight:500;width:40px">Scan</th>
-          <th style="text-align:left;padding:4px 8px;font-weight:500">Share</th>
+          <th style="text-align:center;padding:4px 8px;font-weight:500;width:40px">${translate('scan_header')}</th>
+          <th style="text-align:left;padding:4px 8px;font-weight:500">${translate('share_header')}</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -1059,7 +1098,7 @@ async function testDsmConnection() {
   const password = document.getElementById('dsm-password').value ||
                    (state.settings.dsm_password_set ? '<<stored>>' : '');
   btn.disabled = true;
-  result.textContent = 'Bezig...';
+  result.textContent = translate('testing');
   result.style.color = 'var(--muted)';
   try {
     const payload = {
@@ -1074,7 +1113,7 @@ async function testDsmConnection() {
       payload.use_stored_password = true;
     }
     const data = await apiPost('/api/settings/test_dsm', payload);
-    result.textContent = `✓ Verbonden — ${data.report_count} rapport(en) gevonden`;
+    result.textContent = translate('connected_found_reports', {count: data.report_count});
     result.style.color = 'var(--success, green)';
   } catch(err) {
     result.textContent = `✗ ${err.message}`;

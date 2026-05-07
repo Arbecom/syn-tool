@@ -1,60 +1,73 @@
-# Frontend — static/index.html
+# Frontend — static/html/index.html + static/javascript/index.js + static/css/index.css
 
-Single-file SPA, no build step. All CSS and JS inline. Tabs: Dashboard, Excel Data, History, Settings.
+Single-file SPA served from Flask. No build step, no npm. Tabs: Dashboard, Excel Data, History, Settings.
+JS lives in `static/javascript/index.js`, CSS in `static/css/index.css`, HTML in `static/html/index.html`.
 
 ## i18n (EN / NL)
-- `LANG` object with `en` and `nl` keys (~60 keys each)
-- `t(key, vars)` — looks up `LANG[lang][key]`, interpolates `{placeholder}` vars
-- `getLangFromEnv()` — cookie `lang=xx` → `navigator.language` → default `'en'`; Dutch if starts with `'nl'`
-- `setLang(l)` — sets `lang`, writes cookie `lang=xx;max-age=31536000`, marks active button, re-renders
-- `applyI18n()` — updates all `[data-i18n]` elements; brand span uses `innerHTML` for newline → `<br>`
+- `LANG` object with `en` and `nl` keys (~68 keys each)
+- `translate(key, vars)` — looks up `LANG[lang][key]`, interpolates `{placeholder}` vars
+- `detectLanguage()` — cookie `lang=xx` → `navigator.language` → default `'en'`; Dutch if starts with `'nl'`
+- `setLanguage(code)` — sets `lang`, writes cookie `lang=xx;max-age=31536000`, marks active button, calls `applyTranslations()` + `rerenderCurrentTab()`
+- `applyTranslations()` — updates all `[data-i18n]` elements (textContent or placeholder for `<input>`); also handles `[data-i18n-placeholder]` for password inputs; brand span uses `innerHTML` for newline → `<br>`
 - Language toggle: `<button class="lang-btn" id="btn-en">EN</button>` / `id="btn-nl"` in sidebar footer
+- Default is `'en'`; Dutch only shown when browser/OS is set to a Dutch locale or cookie overrides
 
-## Global state `S`
+## Global state `state`
 ```js
-S = {
-  shares: [],           // array of share objects from /api/shares
-  volumes: {},          // volume stats keyed by base path e.g. "/volume1"
-  shareSort: { col: 'size_bytes', dir: 'desc' },
-  excel: { headers:[], rows:[], _meta:{} },  // last server state
-  editBuffer: [],       // mutable working copy (objects with _share field)
-  dirty: false,
-  sortCol: null,        // active Excel sort column (null = no sort)
-  sortDir: 'asc',
-  colWidths: {},        // { headerName: widthPx } — persisted across re-renders
-  history: { uploads:[], edits:[], mappings:[] },
+state = {
+  shares: [],              // array of share objects from /api/shares/stream + /api/shares/cached
+  volumes: {},             // volume stats keyed by base path e.g. "/volume1"
+  activeScanStream: null,  // active EventSource, or null
+  sharesUpdatedAt: null,   // ISO string — timestamp of last completed scan or cached scanned_at
+  sharesFromCache: false,  // true when showing data from shares_cache.json (not a fresh scan)
+  sharesSort: { column: 'size_bytes', direction: 'desc' },
+  pendingSharePaths: new Set(),  // paths still awaiting size (legacy, always empty now)
+  excelData:  { headers: [], rows: [], _meta: {} },  // last server state
+  editBuffer: [],          // mutable working copy (objects with _share field)
+  isDirty: false,
+  excelSortColumn: null,   // active Excel sort column (null = no sort)
+  excelSortDirection: 'asc',
+  columnWidths: {},        // { headerName: widthPx } — persisted across re-renders
+  history: { uploads: [], edits: [], mappings: [] },
   settings: {},
-  mappings: { key_col:null, map:{} },
-  pendingDiff: null,    // mapping diff from last upload (shown in modal)
+  shareMappings: { key_col: null, map: {} },
+  pendingMappingDiff: null,  // mapping diff from last upload (shown in modal)
 }
 ```
 
 ## Tabs
-`showTab(tab)` — toggles `.active` on nav-items and `.tab-content` divs, calls load function.
+`showTab(tab)` — toggles `.active` on nav-items and `.tab-content` divs, clears `#header-actions`, calls load function.
 Tab IDs: `tab-dashboard`, `tab-excel`, `tab-history`, `tab-settings`.
 
 ## Dashboard
-- `loadShares()` — GETs `/api/shares`, stores in `S.shares` + `S.volumes`, calls `renderShares()`
-- `sortSharesBy(col)` — toggles asc/desc on `S.shareSort`, re-renders
-- `renderShares()` — sorts, updates stat cards, builds table rows
-  - Progress bar denominator: `getVolumeTotal(s.path)` from `os.statvfs()` — falls back to sum of all shares
-  - `getVolumeTotal(sharePath)` — matches path against volume keys with `startsWith(vol + '/')`
-  - Color: `>80%` danger, `>60%` warning, else primary
-  - Row `title` shows `"Volume: X total, Y free"`
+- `loadShares()` — first loads `GET /api/shares/cached` to show last known data immediately (sets `state.sharesFromCache = true`), then opens SSE stream `GET /api/shares/stream`
+- `onScanComplete(warnings)` — called when SSE stream sends `done`; sets `state.sharesUpdatedAt` to now, sets `state.sharesFromCache = false`, shows any warnings as toasts
+- `sortSharesByColumn(col)` — toggles asc/desc on `state.sharesSort`, re-renders
+- `renderShares()` — sorts, updates stat cards, builds table rows, updates progress bar + status text
+
+### Status indicator (`#shares-updated`)
+- **Scanning**: shows `translate('scanning', {done, total})` — no color override
+- **Cached data** (`state.sharesFromCache && !scanning`): shows `translate('cached_since', {date})` in `var(--warning)` amber
+- **Fresh scan done**: shows `translate('updated') + ': ' + formatDate(state.sharesUpdatedAt)` — no color override
+
+### Share row badges
+- `📊 YYYY-MM-DD` — shown when `share.analyzer_date` is set (size from DSM Storage Analyzer)
+- Amber `Cached` badge — shown when `share.is_from_cache === true` (size from `apparent_sizes.json` fallback)
+- Progress bar: `>80%` danger, `>60%` warning, else primary. Denominator: `getVolumeTotal(share.path)` → falls back to sum of all shares
 
 ## Excel tab
 
 ### Load / save / export
-- `loadExcel()` — GETs `/api/excel/current`, sets `S.excel` + `S.editBuffer` (shallow copy of rows)
-- `saveExcel()` — POSTs `{ ...S.excel, rows: S.editBuffer }`, then calls `autoSaveMappings()`
+- `loadExcel()` — GETs `/api/excel/current`, sets `state.excelData` + `state.editBuffer` (shallow copy of rows)
+- `saveExcel()` — POSTs `{ ...state.excelData, rows: state.editBuffer }`, then calls `autoSaveMappings()`
 - `exportExcel()` — saves if dirty, then `window.location.href = '/api/excel/export'`
-- `handleUpload(input)` — uploads file, updates state, shows mapping diff modal if `has_diff`
+- `onFileSelected(input)` — uploads file via `apiUpload()`, updates state, shows mapping diff modal if `has_diff`
 
 ### Table rendering
-- `renderExcel()` — builds `<thead>` and `<tbody>` using `getSortedDisplayOrder()`
+- `renderExcel()` — builds `<thead>` and `<tbody>` using `getSortedRowIndices()`
 - Header cell structure:
   ```html
-  <th data-col="Header" style="width:Npx">
+  <th data-col="Header" style="width:Npx;cursor:pointer">
     <div class="th-inner">
       <span class="th-text" title="Header">Header</span>
       <span class="sort-icon">↕ / ↑ / ↓</span>
@@ -63,17 +76,16 @@ Tab IDs: `tab-dashboard`, `tab-excel`, `tab-history`, `tab-settings`.
   </th>
   ```
 - Sort click on `th` skips if `e.target` is the resize handle
-- `sortExcel(col)` — toggles asc/desc on `S.sortCol`/`S.sortDir`, re-renders
+- `sortExcelByColumn(col)` — toggles asc/desc on `state.excelSortColumn`/`state.excelSortDirection`, re-renders
 
 ### Sorted display order
-- `getSortedDisplayOrder()` — returns original `editBuffer` indices in display order
-- Row IDs: `id="erow-{origIdx}"` — always the original index regardless of display sort
-- Cell handlers always reference original index: `cellChanged(origIdx, col, val)` / `shareLinked(origIdx, shareName)`
+- `getSortedRowIndices()` — returns original `editBuffer` indices in display order
+- Cell handlers always reference original index: `onCellChanged(origIdx, col, val)` / `onShareLinked(origIdx, shareName)`
 
 ### Column resize
-- `.resize-handle` drag: `startColResize(e, th, header)` — updates `th.style.width` live
-- `applyColWidth(th, header, width)` — if `width < 75px`: truncates header with ellipsis + tooltip; otherwise clears
-- `S.colWidths[header]` persists widths across re-renders
+- `.resize-handle` drag: `startColumnResize(e, th, header)` — updates `th.style.width` live
+- `applyColumnWidth(th, header, width)` — if `width < 75px`: truncates header with ellipsis + tooltip; otherwise clears
+- `state.columnWidths[header]` persists widths across re-renders
 
 ### Storage column detection
 - `isStorageCol(header)` — true if header contains `opslag`, `storage`, `gebruik`, `factuur`, `factureren`, `invoice`
@@ -81,14 +93,14 @@ Tab IDs: `tab-dashboard`, `tab-excel`, `tab-history`, `tab-settings`.
 - Storage cells: `<div class="cell-with-unit"><input ...><span class="cell-unit">GB</span></div>`
 
 ### Billing formula (client-side preview)
-- `calcBilling(row, headers)` — `Math.round(gebruikte - (mailbox_gb * mailboxen))`
-- `mailbox_gb` from `S.settings.mailbox_gb ?? 10`
+- `computeBilling(row, headers)` — `Math.round(gebruikte - (mailbox_gb * mailboxen))`
+- `mailbox_gb` from `state.settings.mailbox_gb ?? 10`
 - `Te factureren` column is read-only (`.col-calc`), recalculated live on cell change
 
 ### Row operations
-- `addRow()` — appends row with next sequence number, resets `S.sortCol`, re-renders
+- `addRow()` — appends row with next sequence number, resets `state.excelSortColumn`, re-renders
 - `deleteRow(origIdx)` — confirm modal → splice editBuffer → re-render
-- `syncFromNAS()` — fills `Gebruikte opslag` from `S.shares` by `row._share`, adds `.row-synced` flash animation
+- `syncFromNAS()` — fills `Gebruikte opslag` from `state.shares` by `row._share`, adds `.row-synced` flash animation
 
 ### Auto-save mappings
 `autoSaveMappings()` — called after every `saveExcel()`. Collects all rows with `_share` set and non-empty customer key, POSTs to `/api/mappings/save`. Key column: prefers `klant`/`naam`/`customer`, falls back to `contract`. Keys always `.toLowerCase()`.
@@ -107,82 +119,80 @@ Three sub-tabs: Uploads / Edits / Links (mappings).
 - `loadHistory()` — parallel GETs `/api/history` and `/api/mappings/history`
 - `restoreVersion(type, id, filename)` — confirm → POST restore endpoint
 - `restoreMappings(id, filename)` — confirm → POST restore → `applyMappingsToBuffer()`
-- `applyMappingsToBuffer()` — applies `S.mappings.map` to `editBuffer` by lowercase customer key
+- `applyMappingsToBuffer()` — applies `state.shareMappings.map` to `editBuffer` by lowercase customer key
 
 ## Settings tab
 `loadSettings()` / `renderSettings()` / `saveSettings()`.
 
+### Layout
+Two-column CSS grid (`.settings-grid` with two `.settings-col` children) on screens wider than 900px; single column below.
+- **Left column**: Share Paths, Shares (scan checkbox table)
+- **Right column**: Billing Formula, Retention, Login, DSM Storage Analyzer
+- Save Settings button spans full width below the grid
+
 ### Unified shares table (`id="unified-shares-table"`)
-Replaces the old "Exclude Shares" text-input list. Populated in `renderSettings()` from `state.shares` (sorted A–Z). Shows "scan first" message if no shares loaded.
+Populated in `renderSettings()` from `state.shares` (sorted A–Z). Shows `translate('scan_first')` if no shares loaded.
 
 Each row (Scan checkbox left, share name + badge right):
 - **Scan** checkbox (`.share-scan-cb`, `data-share="name"`): unchecked = add to `exclude_shares` on save. Default: checked unless share is currently in `exclude_shares`.
-- Share name + analyzer badge: `📊 YYYY-MM-DD` (green, `var(--success)`) if `analyzer_date` set, else `Geen rapport` (muted)
+- Share name + analyzer badge: `📊 YYYY-MM-DD` (green) if `analyzer_date` set, else `translate('no_report')` (muted)
 
 Checkbox states survive re-renders (saved to `prevScan` map before innerHTML overwrite).
 
 `saveSettings()` derives `exclude_shares` from: @/# patterns preserved + named exclusions not in table + unchecked Scan rows. Falls back to `state.settings.exclude_shares` if table not rendered.
 
-Fields:
+### Fields
+All labels, placeholders, and hint text go through `translate()` or `data-i18n` / `data-i18n-placeholder` attributes:
 - share_paths (list), mailbox_gb (number)
 - upload/edit retention (select 5/10/20/50)
-- Auth: `auth-username` text input + `auth-password` password input (blank = keep existing)
-- DSM section: `dsm-host`, `dsm-port`, `dsm-user`, `dsm-password` (password input)
-  - `renderSettings()` populates DSM fields from `state.settings`; shows `✓ ingesteld` hint when `dsm_password_set` is true
+- Auth: `auth-username` text + `auth-password` password (blank = keep existing, placeholder via `data-i18n-placeholder="password_blank"`)
+- DSM section: `dsm-host`, `dsm-port`, `dsm-user`, `dsm-password` (blank = unchanged, placeholder via `data-i18n-placeholder="password_blank_dsm"`)
+  - `renderSettings()` shows/hides `#dsm-password-set` span (`data-i18n="dsm_password_set_hint"`) when `dsm_password_set` is true
   - `saveSettings()` always sends `dsm_host`, `dsm_port`, `dsm_user`; only sends `dsm_password` if non-empty
 
 ### DSM actions
 `testDsmConnection()` — `id="dsm-test-btn"` / result in `id="dsm-test-result"`:
-- Reads current form values; if password is blank and `state.settings.dsm_password_set` is true, sends `use_stored_password: true` instead
+- Shows `translate('testing')` while running
+- If password blank and `state.settings.dsm_password_set` is true, sends `use_stored_password: true`
 - POSTs to `/api/settings/test_dsm`
-- Success: `✓ Verbonden — N rapport(en) gevonden`; failure: `✗ <error>`
-
-`toast(msg, type)` — uses `innerHTML` with `\n→<br>` conversion. Error/warning toasts stay 9s (default 3.2s). `.toast.error/.warning` max-width 520px.
+- Success: `translate('connected_found_reports', {count})` in green; failure: `✗ <error>` in red
 
 ## Auth / Login
-
-### Login overlay
-Full-page dark overlay (`#login-overlay`, class `login-overlay`, hidden by default):
-```html
-<div id="login-overlay" class="hidden">
-  <div class="login-card">
-    <!-- brand, username input, password input (onkeydown Enter → doLogin), login button, error div -->
-  </div>
-</div>
-```
-Logout button (`↩`) in sidebar footer with `id="logout-btn"` calls `doLogout()`.
-
-### Auth functions
-- `checkAuth()` — GETs `/api/auth/status`. If `auth_enabled && !authenticated`: shows login overlay, stops init. Otherwise hides overlay, shows logout btn if auth_enabled, proceeds with `loadShares()` etc.
-- `showLogin()` / `hideLogin()` — toggles `hidden` class on `#login-overlay`
-- `doLogin()` — POSTs `{ username, password }` to `/api/auth/login`. On success: `hideLogin()`, `loadShares()` etc. On fail: shows error in `#login-error`.
-- `doLogout()` — POSTs to `/api/auth/logout`, then `checkAuth()`.
-
-### 401 handling in GET/POST helpers
-`GET()` and `POST()` both call `showLogin()` on HTTP 401 response instead of propagating the error.
+Auth redirects to a separate `/login` page (not an overlay). `checkAuth()` calls `GET /api/auth/status`; if unauthenticated it navigates to `/login`. `doLogout()` POSTs to `/api/auth/logout` then navigates to `/login`. `apiGet()`/`apiPost()` redirect to `/login` on HTTP 401.
 
 ## Utility functions
-- `esc(s)` — HTML escape
-- `fmtBytes(b)` — auto-unit: B/KB/MB/GB/TB
-- `fmtDate(iso)` — `toLocaleString('nl-NL')` or `'en-GB'` based on `lang`
-- `setDirty(v)` — shows/hides unsaved badge, enables/disables Save button
-- `findCol(headers, ...kws)` — first header containing any keyword (case-insensitive)
-- `toast(msg, type)` — bottom-right, auto-dismiss 3.2s (types: info/success/error/warning)
-- `showConfirm(title, msg, onOk)` / `closeModal()` — generic confirm modal
+- `escapeHtml(str)` — HTML escape
+- `formatBytes(bytes)` — auto-unit: B/KB/MB/GB/TB
+- `formatDate(isoString)` — `toLocaleString('nl-NL')` or `'en-GB'` based on `lang`
+- `setDirty(isDirty)` — shows/hides unsaved badge, enables/disables Save button
+- `findColumn(headers, ...keywords)` — first header containing any keyword (case-insensitive)
+- `toast(msg, type)` — bottom-right, auto-dismiss 3.2s (types: info/success/error/warning); error/warning stay 9s
+- `showConfirm(title, msg, onOk)` / `closeModal()` — generic confirm `<dialog>`
+- `getVolumeTotal(sharePath)` — matches path against `state.volumes` keys
 
 ## CSS variables
 ```css
 --primary: #3b82f6;  --success: #22c55e;  --warning: #f59e0b;  --danger: #ef4444;
 --bg: #f1f5f9;  --card-bg: #ffffff;  --text: #1e293b;  --muted: #64748b;  --border: #e2e8f0;
+--radius: 8px;
+```
+
+## Settings CSS
+```css
+.settings-grid { display:grid; grid-template-columns:1fr 1fr; gap:0 40px; align-items:start; }
+@media (max-width:900px) { .settings-grid { grid-template-columns:1fr; } }
+.form-label { width:130px; }
 ```
 
 ## Init (DOMContentLoaded)
 ```js
-lang = getLangFromEnv();
-setLang(lang);
+lang = detectLanguage();
+setLanguage(lang);
 // wire nav click handlers, modal click-outside, beforeunload dirty warning
-await checkAuth();  // shows login overlay and stops if not authenticated
-GET('/api/mappings').then(d => { S.mappings = d; }).catch(() => {});
-loadShares();
+const isAuthed = await checkAuth();  // redirects to /login if not authenticated
+if (isAuthed) {
+  apiGet('/api/mappings').then(data => { state.shareMappings = data; }).catch(() => {});
+  loadShares();
+}
 ```
 DOMContentLoaded handler is `async` to allow `await checkAuth()`.

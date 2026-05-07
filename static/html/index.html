@@ -134,82 +134,88 @@
       <!-- ========== SETTINGS ========== -->
       <section id="tab-settings" class="tab-content">
         <section class="card"><section class="card-body">
-          <section class="settings-section">
-            <h3 data-i18n="share_paths"></h3>
-            <ul id="share-paths-list"></ul>
-            <p style="display:flex;gap:8px;margin-top:8px">
-              <input id="new-share-path" placeholder="/volume1" style="flex:1">
-              <button class="btn-secondary" onclick="addSharePath()" data-i18n="add"></button>
-            </p>
-          </section>
-          <section class="settings-section">
-            <h3>Shares</h3>
-            <p style="color:var(--muted);font-size:12px;margin-bottom:10px">Selecteer welke shares worden meegenomen in de dashboardscan.</p>
-            <div id="unified-shares-table"></div>
-          </section>
-          <section class="settings-section">
-            <h3 data-i18n="billing_formula"></h3>
-            <p class="form-row">
-              <label class="form-label" data-i18n="mailbox_gb_label"></label>
-              <input type="number" id="mailbox-gb" min="0" step="0.5" style="width:90px">
-              <span style="color:var(--muted);font-size:12px;margin-left:6px">= <span data-i18n="factur_formula_hint"></span></span>
-            </p>
-          </section>
-          <section class="settings-section">
-            <h3 data-i18n="retention"></h3>
-            <p class="form-row">
-              <label class="form-label" data-i18n="upload_ret_label"></label>
-              <select id="upload-retention">
-                <option value="5">5</option><option value="10">10</option>
-                <option value="20">20</option><option value="50">50</option>
-              </select>
-            </p>
-            <p class="form-row">
-              <label class="form-label" data-i18n="edit_ret_label"></label>
-              <select id="edit-retention">
-                <option value="5">5</option><option value="10">10</option>
-                <option value="20">20</option><option value="50">50</option>
-              </select>
-            </p>
-          </section>
-          <section class="settings-section">
-            <h3>Login</h3>
-            <p class="form-row">
-              <label class="form-label">Username</label>
-              <input type="text" id="auth-username" style="width:180px" autocomplete="off">
-            </p>
-            <p class="form-row">
-              <label class="form-label">Password</label>
-              <input type="password" id="auth-password" style="width:180px" autocomplete="new-password" placeholder="Leave blank to keep current">
-            </p>
-          </section>
-          <section class="settings-section">
-            <h3>DSM Storage Analyzer</h3>
-            <p style="color:var(--muted);font-size:12px;margin-bottom:10px">Nauwkeurige share-groottes rechtstreeks uit DSM Storage Analyzer (omzeilt ACL-beperkingen).</p>
-            <p class="form-row">
-              <label class="form-label">Host</label>
-              <input type="text" id="dsm-host" style="width:140px" autocomplete="off" placeholder="localhost">
-            </p>
-            <p class="form-row">
-              <label class="form-label">Port</label>
-              <input type="number" id="dsm-port" style="width:80px" min="1" max="65535" placeholder="3333">
-            </p>
-            <p class="form-row">
-              <label class="form-label">Gebruiker</label>
-              <input type="text" id="dsm-user" style="width:140px" autocomplete="off">
-            </p>
-            <p class="form-row">
-              <label class="form-label">Wachtwoord</label>
-              <input type="password" id="dsm-password" style="width:140px" autocomplete="new-password" placeholder="Leeg = ongewijzigd">
-              <span id="dsm-password-set" style="color:var(--muted);font-size:12px;margin-left:6px;display:none">✓ ingesteld</span>
-            </p>
-            <p class="form-row">
-              <label class="form-label"></label>
-              <button class="btn-secondary" onclick="testDsmConnection()" id="dsm-test-btn">Verbinding testen</button>
-              <span id="dsm-test-result" style="font-size:12px;margin-left:8px"></span>
-            </p>
-          </section>
-          <button class="btn-primary" onclick="saveSettings()" data-i18n="save_settings"></button>
+          <div class="settings-grid">
+            <div class="settings-col">
+              <section class="settings-section">
+                <h3 data-i18n="share_paths"></h3>
+                <ul id="share-paths-list"></ul>
+                <p style="display:flex;gap:8px;margin-top:8px">
+                  <input id="new-share-path" placeholder="/volume1" style="flex:1">
+                  <button class="btn-secondary" onclick="addSharePath()" data-i18n="add"></button>
+                </p>
+              </section>
+              <section class="settings-section">
+                <h3 data-i18n="stat_count"></h3>
+                <p style="color:var(--muted);font-size:12px;margin-bottom:10px" data-i18n="shares_select"></p>
+                <div id="unified-shares-table"></div>
+              </section>
+            </div>
+            <div class="settings-col">
+              <section class="settings-section">
+                <h3 data-i18n="billing_formula"></h3>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="mailbox_gb_label"></label>
+                  <input type="number" id="mailbox-gb" min="0" step="0.5" style="width:90px">
+                  <span style="color:var(--muted);font-size:12px;margin-left:6px">= <span data-i18n="factur_formula_hint"></span></span>
+                </p>
+              </section>
+              <section class="settings-section">
+                <h3 data-i18n="retention"></h3>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="upload_ret_label"></label>
+                  <select id="upload-retention">
+                    <option value="5">5</option><option value="10">10</option>
+                    <option value="20">20</option><option value="50">50</option>
+                  </select>
+                </p>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="edit_ret_label"></label>
+                  <select id="edit-retention">
+                    <option value="5">5</option><option value="10">10</option>
+                    <option value="20">20</option><option value="50">50</option>
+                  </select>
+                </p>
+              </section>
+              <section class="settings-section">
+                <h3 data-i18n="login"></h3>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="username"></label>
+                  <input type="text" id="auth-username" style="width:180px" autocomplete="off">
+                </p>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="password"></label>
+                  <input type="password" id="auth-password" style="width:180px" autocomplete="new-password" data-i18n-placeholder="password_blank">
+                </p>
+              </section>
+              <section class="settings-section">
+                <h3 data-i18n="dsm_storage_analyzer"></h3>
+                <p style="color:var(--muted);font-size:12px;margin-bottom:10px" data-i18n="analyzer_info"></p>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="host"></label>
+                  <input type="text" id="dsm-host" style="width:140px" autocomplete="off" placeholder="localhost">
+                </p>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="port"></label>
+                  <input type="number" id="dsm-port" style="width:80px" min="1" max="65535" placeholder="3333">
+                </p>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="user"></label>
+                  <input type="text" id="dsm-user" style="width:140px" autocomplete="off">
+                </p>
+                <p class="form-row">
+                  <label class="form-label" data-i18n="password"></label>
+                  <input type="password" id="dsm-password" style="width:140px" autocomplete="new-password" data-i18n-placeholder="password_blank_dsm">
+                  <span id="dsm-password-set" style="color:var(--muted);font-size:12px;margin-left:6px;display:none" data-i18n="dsm_password_set_hint"></span>
+                </p>
+                <p class="form-row">
+                  <label class="form-label"></label>
+                  <button class="btn-secondary" onclick="testDsmConnection()" id="dsm-test-btn" data-i18n="test_connection"></button>
+                  <span id="dsm-test-result" style="font-size:12px;margin-left:8px"></span>
+                </p>
+              </section>
+            </div>
+          </div>
+          <button class="btn-primary" onclick="saveSettings()" data-i18n="save_settings" style="margin-top:8px"></button>
         </section></section>
       </section>
 

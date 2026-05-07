@@ -584,17 +584,24 @@ def api_shares_stream():
 
             for base, path, name in shares_to_scan:
                 analyzer_bytes = analyzer_sizes.get(name, 0)
+                is_from_cache = False
                 if analyzer_bytes > 0:
                     sb = analyzer_bytes
                     apparent_cache[path] = sb
                 else:
-                    sb = apparent_cache.get(path, btrfs_sizes.get(path, 0))
+                    cached_size = apparent_cache.get(path)
+                    if cached_size is not None:
+                        sb = cached_size
+                        is_from_cache = True
+                    else:
+                        sb = btrfs_sizes.get(path, 0)
 
                 share = {
                     "name": name, "path": path, "base": base,
                     "size_bytes": sb, "size_gb": bytes_to_gb(sb),
                     "size_human": human_size(sb), "pending": False,
                     "analyzer_date": analyzer_dates.get(name, ""),
+                    "is_from_cache": is_from_cache,
                 }
                 all_shares_collected.append(share)
                 yield f'data: {json.dumps({"type":"share","share":share})}\n\n'

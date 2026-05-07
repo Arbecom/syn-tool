@@ -1,12 +1,13 @@
 # Backend — app.py
 
 ## Data paths (all under DATA_DIR, default `./data`)
-```
+
+```text
 data/
   current.json          — active Excel data { headers, rows, _meta }
   config.json           — user settings (auth, DSM credentials, share paths, etc.)
   mappings.json         — customer→share mappings (persisted across uploads)
-  apparent_sizes.json   — cache of last-known share sizes (du + analyzer results)
+  apparent_sizes.json   — cache of last-known share sizes (analyzer + btrfs results)
   shares_cache.json     — last full scan result (shares + volumes)
   .secret_key           — Flask session secret key + DSM credential encryption key
   uploads/              — raw uploaded .xlsx/.xls files
@@ -15,6 +16,7 @@ data/
 ```
 
 ## DEFAULT_CONFIG
+
 ```python
 DEFAULT_CONFIG = {
     "share_paths":    ["/volume1"],
@@ -33,6 +35,7 @@ DEFAULT_CONFIG = {
 ```
 
 Internal sentinel keys written by env-var password handling (never shown in API responses):
+
 - `_env_auth_pw_sentinel` — sha256 of env-var auth password, used to detect changes
 - `_env_dsm_pw_sentinel`  — sha256 of env-var DSM password, used to detect changes
 
@@ -95,9 +98,9 @@ SSE endpoint. Only one scan runs at a time (`_scan_lock`).
 **Pre-scan:** Calls `_get_dsm_analyzer_sizes(cfg)` + `_btrfs_sizes_for_paths()` if DSM credentials are configured. Results used immediately — no Phase 2.
 
 **Share emit:** One `share` event per share, all `pending: false`. Size priority:
-1. Storage Analyzer size (accurate, bypasses ACLs)
-2. `apparent_sizes.json` cache (last known value)
-3. btrfs qgroup estimate (fast, may undercount Active Backup shares)
+1. Storage Analyzer size (accurate, bypasses ACLs) — `is_from_cache: false`, `analyzer_date` set
+2. `apparent_sizes.json` cache (last known value) — `is_from_cache: true`, `analyzer_date` empty
+3. btrfs qgroup estimate (fast, may undercount Active Backup shares) — `is_from_cache: false`, `analyzer_date` empty
 
 Followed immediately by `done` then `all_done` — scan completes in a single pass.
 
@@ -167,7 +170,7 @@ DSM HTTP API port on this NAS is **3333** (not 5000). Discovery via:
 `curl http://localhost:3333/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query&query=all`
 
 ### `_btrfs_sizes_for_paths(paths, base)`
-Returns `(sizes, du_needed)` tuple. (`du_needed` is unused since du was removed — kept for reference.)
+Returns `(sizes, _)` tuple (second element unused).
 1. Runs `btrfs subvolume show PATH` in parallel for each share → gets subvolume IDs
 2. Tries direct `btrfs qgroup show --raw base`, falls back to `nsenter --target 1 --mount --`
    (nsenter enters host mount namespace from Docker — PID 1 via `pid: host`)
@@ -176,16 +179,6 @@ Returns `(sizes, du_needed)` tuple. (`du_needed` is unused since du was removed 
 **Known limitation:** Active Backup shares (GsuiteBackup, Office365BackUp, M365-BU-*) have
 `excl=0` in btrfs (all data shared via reflinks), so qgroup `rfer` severely underestimates.
 Storage Analyzer is the only accurate source for these shares.
-
-### ~~`_du_size(path)`~~ — removed
-`du --apparent-size` was removed. All shares emit immediately with no Phase 2 scan.
-
-### `_get_dsm_analyzer_sizes(cfg)` — return type
-Returns `(sizes: dict, dates: dict)` tuple.
-- `sizes[share_name] = size_bytes` — largest value across all reports
-- `dates[share_name] = 'YYYY-MM-DD'` — scan date parsed from report path (`/dar/Name/2026-04-28_08-55-48/report.html`)
-
-Share objects emitted by the SSE stream include `analyzer_date` (ISO date string or empty).
 
 ### Scan logic (api_shares_stream)
 1. Call `_get_dsm_analyzer_sizes(cfg)` and `_btrfs_sizes_for_paths()` — no I/O to share directories
