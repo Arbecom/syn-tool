@@ -7,7 +7,7 @@ data/
   current.json          — active Excel data { headers, rows, _meta }
   config.json           — user settings (auth, DSM credentials, share paths, etc.)
   mappings.json         — customer→share mappings (persisted across uploads)
-  apparent_sizes.json   — cache of last-known share sizes (analyzer + btrfs results)
+  apparent_sizes.json   — cache: { path: { size, source, analyzer_date } }
   shares_cache.json     — last full scan result (shares + volumes)
   .secret_key           — Flask session secret key + DSM credential encryption key
   uploads/              — raw uploaded .xlsx/.xls files
@@ -47,6 +47,7 @@ Sessions are permanent (30 days).
 `@app.before_request` blocks all `/api/*` routes (except `/api/auth/*`) with 401 if not authenticated.
 
 ### Password storage
+
 **App login password:** stored as `pbkdf2:sha256:50000:<salt_hex>:<hash_hex>` — one-way, unrecoverable.
 Legacy plaintext passwords auto-upgrade to PBKDF2 on first successful login.
 
@@ -56,11 +57,13 @@ Legacy plaintext passwords auto-upgrade to PBKDF2 on first successful login.
 `dsm_password_set` (bool) is included in the response instead.
 
 ### Auth routes
+
 - `GET /api/auth/status` — `{ authenticated, auth_enabled }` — always public
 - `POST /api/auth/login` — body: `{ username, password }` → verifies hash, auto-upgrades legacy plaintext, sets session
 - `POST /api/auth/logout` — clears session
 
 ### Credential helpers
+
 - `hash_password(password)` → pbkdf2 string
 - `verify_password(password, stored)` → bool (handles legacy plaintext)
 - `_encrypt_credential(plaintext)` → `enc:<base64>` (uses .secret_key + random IV)
@@ -73,7 +76,7 @@ Legacy plaintext passwords auto-upgrade to PBKDF2 on first successful login.
 All settings can be set via env vars (take priority over config.json):
 
 | Variable | Config key | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `SYNTOOL_AUTH_USERNAME` | auth_username | |
 | `SYNTOOL_AUTH_PASSWORD` | auth_password | auto-hashed PBKDF2, unrecoverable |
 | `SYNTOOL_AUTH_ENABLED` | auth_enabled | `true`/`false`/`1`/`0` |
@@ -93,58 +96,76 @@ to config.json. Subsequent requests only do a fast sha256 comparison, not full P
 ## API Routes
 
 ### `GET /api/shares/stream`
+
 SSE endpoint. Only one scan runs at a time (`_scan_lock`).
 
-**Pre-scan:** Calls `_get_dsm_analyzer_sizes(cfg)` + `_btrfs_sizes_for_paths()` if DSM credentials are configured. Results used immediately — no Phase 2.
+**Pre-scan:** Calls `_get_dsm_analyzer_sizes(cfg)` + `_btrfs_sizes_for_paths()`. Results used immediately — no Phase 2.
 
-**Share emit:** One `share` event per share, all `pending: false`. Size priority:
-1. Storage Analyzer size (accurate, bypasses ACLs) — `is_from_cache: false`, `analyzer_date` set
-2. `apparent_sizes.json` cache (last known value) — `is_from_cache: true`, `analyzer_date` empty
-3. btrfs qgroup estimate (fast, may undercount Active Backup shares) — `is_from_cache: false`, `analyzer_date` empty
+**Share emit:** One `share` event per share, all `pending: false`. `size_source` values:
+
+1. `"analyzer_fresh"` — fresh DSM Storage Analyzer result; `analyzer_date` set; saved to apparent cache
+2. `"analyzer_cached"` — apparent cache hit, stored source was `"analyzer"`; `analyzer_date` from cache
+3. `"btrfs_cached"` — apparent cache hit, stored source was `"btrfs"`; `analyzer_date: ""`
+4. `"btrfs_live"` — live btrfs qgroup fallback; saved to apparent cache for future use
+
+**apparent_sizes.json format:** `{ "/volume1/ShareName": { "size": bytes, "source": "analyzer"|"btrfs", "analyzer_date": "YYYY-MM-DD"|"" } }`.
+`load_apparent_cache()` auto-migrates old `{ path: bytes }` format to the dict format (old entries treated as `source: "analyzer"`).
 
 Followed immediately by `done` then `all_done` — scan completes in a single pass.
 
 Events: `discovered`, `share`, `done`, `all_done`, `busy`, `error`. (`share_update` never emitted.)
 
 ### `GET /api/shares/cached`
+
 Returns last scan result from `shares_cache.json`.
 
 ### `GET /api/excel/current`
+
 Returns `current.json` or empty `{ headers:[], rows:[], _meta:{} }`.
 
 ### `POST /api/excel/upload`
+
 Multipart `file` field (.xlsx or .xls). Saves raw file to `uploads/`, parses, applies stored mappings, writes `current.json`.
 Returns `{ success, data, mapping_diff }` — `mapping_diff.has_diff` triggers diff modal in frontend.
 
 ### `POST /api/excel/save`
+
 Body: `{ headers, rows, _meta, ... }`. Snapshots current.json to edits/ first, then overwrites.
 
 ### `GET /api/excel/export`
+
 Builds .xlsx via `build_excel()`, returns as download. Re-inserts billing formula.
 Filename: `opslag_YYYYMMDD_HHMMSS.xlsx`
 
 ### `GET /api/history`
+
 Returns `{ uploads:[...], edits:[...] }` sorted by mtime descending.
 
 ### `POST /api/history/restore/upload/<id>` / `POST /api/history/restore/edit/<id>`
+
 Restores from upload or edit snapshot.
 
 ### `GET /api/mappings` / `POST /api/mappings/save`
+
 GET returns `mappings.json`. POST body: `{ key_col, updates, remove }`.
 
 ### `GET /api/mappings/history` / `POST /api/mappings/restore/<snap_id>`
+
 Mappings version history and restore.
 
 ### `GET /api/settings`
+
 Returns full config minus `auth_password` and `dsm_password`. Includes `dsm_password_set: bool`.
 
 ### `POST /api/settings`
+
 Accepted fields: `share_paths`, `exclude_shares`, `upload_retention`, `edit_retention`,
 `mailbox_gb`, `auth_enabled`, `auth_username`, `auth_password`,
 `dsm_host`, `dsm_port`, `dsm_user`, `dsm_password`.
 `dsm_password` is encrypted before storage. `auth_password` is PBKDF2-hashed.
 
 ### `POST /api/settings/test_dsm`
+
 Body: `{ dsm_host, dsm_port, dsm_user, dsm_password }` or `{ ..., use_stored_password: true }`.
 Authenticates to DSM and calls `SYNO.Core.Report&method=list`.
 Returns `{ success, report_count }` or `{ error }`.
@@ -152,14 +173,16 @@ Returns `{ success, report_count }` or `{ error }`.
 ## Share size measurement
 
 ### Priority order
-1. **DSM Storage Analyzer** (most accurate — uses DSM kernel privileges, bypasses POSIX ACLs)
-2. **apparent_sizes.json cache** (last known value from a previous successful scan)
-3. **btrfs qgroup** (fast estimate; unreliable for Active Backup shares where excl=0)
 
-`du --apparent-size` has been removed — all shares emit immediately with no Phase 2.
+1. **DSM Storage Analyzer** (most accurate — uses DSM kernel privileges, bypasses POSIX ACLs)
+2. **apparent_sizes.json cache, analyzer entry** (date preserved from original scan)
+3. **apparent_sizes.json cache, btrfs entry** (stale btrfs estimate)
+4. **btrfs qgroup live** (fast estimate; unreliable for Active Backup shares where excl=0)
 
 ### `_get_dsm_analyzer_sizes(cfg)`
+
 Authenticates to DSM HTTP API (`http://{dsm_host}:{dsm_port}/webapi/`).
+
 1. `POST /webapi/entry.cgi` with `SYNO.API.Auth&method=login&format=cookie` → session cookie
 2. `POST /webapi/entry.cgi` with `SYNO.Core.Report&version=1&method=list` → all Storage Analyzer reports
 3. For each report with `status=success`: fetches HTML at `link` field (`/dar/...`)
@@ -170,7 +193,9 @@ DSM HTTP API port on this NAS is **3333** (not 5000). Discovery via:
 `curl http://localhost:3333/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query&query=all`
 
 ### `_btrfs_sizes_for_paths(paths, base)`
+
 Returns `(sizes, _)` tuple (second element unused).
+
 1. Runs `btrfs subvolume show PATH` in parallel for each share → gets subvolume IDs
 2. Tries direct `btrfs qgroup show --raw base`, falls back to `nsenter --target 1 --mount --`
    (nsenter enters host mount namespace from Docker — PID 1 via `pid: host`)
@@ -180,23 +205,20 @@ Returns `(sizes, _)` tuple (second element unused).
 `excl=0` in btrfs (all data shared via reflinks), so qgroup `rfer` severely underestimates.
 Storage Analyzer is the only accurate source for these shares.
 
-### Scan logic (api_shares_stream)
-1. Call `_get_dsm_analyzer_sizes(cfg)` and `_btrfs_sizes_for_paths()` — no I/O to share directories
-2. Emit all shares immediately, all `pending: false`:
-   - Analyzer size → accurate, saved to apparent_cache
-   - Otherwise → apparent_cache value, then btrfs qgroup as last resort
-3. Emit `done` then `all_done` — stream closes, scan complete in one pass, no Phase 2
-
 ## Key functions
 
 ### `detect_key_col(headers)`
+
 Prefers customer name over contract number.
 
 ### `compute_mapping_diff(headers, rows, mappings)`
+
 Matches rows to stored mappings by `display_name.lower()`. Returns `{ key_col, applied, new, removed, changed, has_diff }`.
 
 ### `build_excel(data, cfg)`
+
 Reconstructs .xlsx. Re-inserts billing formula: `=G{ri}-({mailbox_gb}*E{ri})`.
 
-### Retention
-`_apply_retention(directory, pattern, keep)` — sorts by mtime, deletes files beyond `keep`.
+### `_apply_retention(directory, pattern, keep)`
+
+Sorts by mtime, deletes files beyond `keep`.

@@ -489,12 +489,21 @@ function renderShares() {
     const subtitle    = volumeInfo
       ? translate('volume_info', { total: formatBytes(volumeInfo.total_bytes), free: formatBytes(volumeInfo.free_bytes) })
       : '';
-    return `<tr title="${escapeHtml(subtitle)}">
+    // Compat: old shares_cache.json may have is_from_cache/analyzer_date but no size_source
+    const sizeSrc = share.size_source || (share.analyzer_date ? 'analyzer_fresh' : (share.is_from_cache ? 'btrfs_cached' : 'btrfs_live'));
+    const isAnalyzer = sizeSrc === 'analyzer_fresh' || sizeSrc === 'analyzer_cached';
+    const analyzerBadge = isAnalyzer
+      ? ` <span style="font-size:10px;color:var(--muted);margin-left:4px" title="${translate('analyzer_scan_date')}">📊${share.analyzer_date ? ' ' + escapeHtml(share.analyzer_date) : ''}</span>`
+      : '';
+    const btrfsCachedBadge = sizeSrc === 'btrfs_cached'
+      ? ` <span style="font-size:10px;background:var(--warning);color:#fff;padding:1px 5px;border-radius:3px;margin-left:4px" title="${translate('cached_since', {date: formatDate(state.sharesUpdatedAt)})}">${translate('cache_indicator')}</span>`
+      : '';
+    return `<tr>
       <td><strong>${escapeHtml(share.name)}</strong></td>
       <td class="cell-muted cell-mono">${escapeHtml(share.path)}</td>
-      <td><strong>${escapeHtml(share.size_human)}</strong>${share.pending ? ' <span class="spinner" style="width:10px;height:10px;border-width:2px;vertical-align:middle" title="Calculating exact size…"></span>' : ''}${share.analyzer_date ? ` <span style="font-size:10px;color:var(--muted);margin-left:4px" title="${translate('analyzer_scan_date')}">📊 ${escapeHtml(share.analyzer_date)}</span>` : ''}${share.is_from_cache ? ` <span style="font-size:10px;background:var(--warning);color:#fff;padding:1px 5px;border-radius:3px;margin-left:4px" title="${translate('cached_since', {date: formatDate(state.sharesUpdatedAt)})}">${translate('cache_indicator')}</span>` : ''}</td>
+      <td><strong>${escapeHtml(share.size_human)}</strong>${share.pending ? ' <span class="spinner" style="width:10px;height:10px;border-width:2px;vertical-align:middle"></span>' : ''}${analyzerBadge}${btrfsCachedBadge}</td>
       <td class="cell-mono">${share.size_gb}</td>
-      <td>
+      <td title="${escapeHtml(subtitle)}">
         <div class="bar-wrap">
           <div class="bar-bg"><div class="bar-fill" style="width:${percentage.toFixed(1)}%;background:${barColor}"></div></div>
           <div style="font-size:10px;color:var(--muted);margin-top:2px">${percentage.toFixed(1)}%${volTotal ? '' : ' *'}</div>
@@ -1025,8 +1034,10 @@ function renderSettings() {
     const sorted = state.shares.slice().sort((a, b) => a.name.localeCompare(b.name));
     const rows = sorted.map(s => {
       const scanChecked = s.name in prevScan ? prevScan[s.name] : !excludeSet.has(s.name);
-      const badge = s.analyzer_date
-        ? `<span style="font-size:10px;color:var(--success);margin-left:6px" title="${translate('analyzer_scan_date')}">📊 ${escapeHtml(s.analyzer_date)}</span>`
+      const ssrc = s.size_source || (s.analyzer_date ? 'analyzer_fresh' : (s.is_from_cache ? 'btrfs_cached' : 'btrfs_live'));
+      const hasAnalyzer = ssrc === 'analyzer_fresh' || ssrc === 'analyzer_cached';
+      const badge = hasAnalyzer
+        ? `<span style="font-size:10px;color:var(--success);margin-left:6px" title="${translate('analyzer_scan_date')}">📊${s.analyzer_date ? ' ' + escapeHtml(s.analyzer_date) : ''}</span>`
         : `<span style="font-size:10px;color:var(--muted);margin-left:6px">${translate('no_report')}</span>`;
       return `<tr style="border-bottom:1px solid var(--border)">
         <td style="text-align:center;padding:5px 8px;width:40px"><input type="checkbox" class="share-scan-cb" data-share="${escapeHtml(s.name)}" ${scanChecked ? 'checked' : ''}></td>

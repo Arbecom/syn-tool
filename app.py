@@ -95,7 +95,15 @@ def load_apparent_cache() -> dict:
     if APPARENT_SIZES_FILE.exists():
         try:
             with open(APPARENT_SIZES_FILE) as f:
-                return json.load(f)
+                data = json.load(f)
+            # Migrate old format {path: bytes} → new format {path: {size, source, analyzer_date}}
+            migrated = {}
+            for k, v in data.items():
+                if isinstance(v, (int, float)):
+                    migrated[k] = {"size": int(v), "source": "analyzer", "analyzer_date": ""}
+                else:
+                    migrated[k] = v
+            return migrated
         except Exception:
             pass
     return {}
@@ -584,30 +592,36 @@ def api_shares_stream():
 
             for base, path, name in shares_to_scan:
                 analyzer_bytes = analyzer_sizes.get(name, 0)
-                is_from_cache = False
+                share_analyzer_date = analyzer_dates.get(name, "")
+
                 if analyzer_bytes > 0:
                     sb = analyzer_bytes
-                    apparent_cache[path] = sb
+                    size_source = "analyzer_fresh"
+                    apparent_cache[path] = {"size": sb, "source": "analyzer", "analyzer_date": share_analyzer_date}
                 else:
-                    cached_size = apparent_cache.get(path)
-                    if cached_size is not None:
-                        sb = cached_size
-                        is_from_cache = True
+                    cached = apparent_cache.get(path)
+                    if cached is not None:
+                        sb = cached["size"]
+                        share_analyzer_date = cached.get("analyzer_date", "")
+                        cached_src = cached.get("source", "analyzer")
+                        size_source = "analyzer_cached" if cached_src == "analyzer" else "btrfs_cached"
                     else:
                         sb = btrfs_sizes.get(path, 0)
+                        size_source = "btrfs_live"
+                        if sb > 0:
+                            apparent_cache[path] = {"size": sb, "source": "btrfs", "analyzer_date": ""}
 
                 share = {
                     "name": name, "path": path, "base": base,
                     "size_bytes": sb, "size_gb": bytes_to_gb(sb),
                     "size_human": human_size(sb), "pending": False,
-                    "analyzer_date": analyzer_dates.get(name, ""),
-                    "is_from_cache": is_from_cache,
+                    "analyzer_date": share_analyzer_date,
+                    "size_source": size_source,
                 }
                 all_shares_collected.append(share)
                 yield f'data: {json.dumps({"type":"share","share":share})}\n\n'
 
-            if analyzer_sizes:
-                save_apparent_cache(apparent_cache)
+            save_apparent_cache(apparent_cache)
 
             try:
                 with open(DATA_DIR / "shares_cache.json", "w") as f:
